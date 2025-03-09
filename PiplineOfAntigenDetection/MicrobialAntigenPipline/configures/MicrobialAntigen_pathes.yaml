@@ -1,0 +1,43 @@
+#配置资源路经
+path:
+  host_fa_hg38 : '/data/rawdata/GM/project/mic_neoantigen/BioDatahub/GRCh38/GCA_000001405.15_GRCh38_no_alt_analysis_set.fa'
+  host_img_hg38 : '/data/rawdata/GM/project/mic_neoantigen/BioDatahub/GRCh38/GCA_000001405.15_GRCh38_no_alt_analysis_set.fa.img'
+  host_kmer_hg38 : '/data/rawdata/GM/project/mic_neoantigen/BioDatahub/GRCh38/GCA_000001405.15_GRCh38_no_alt_analysis_set.hss'
+
+  host_fa_t2t : '/data/rawdata/GM/project/mic_neoantigen/BioDatahub/t2t/chm13v2.0.fa'
+  host_img_t2t : '/data/rawdata/GM/project/mic_neoantigen/BioDatahub/t2t/chm13v2.0.fa.img'
+  host_kmer_t2t : '/data/rawdata/GM/project/mic_neoantigen/BioDatahub/t2t/chm13v2.0.hss'
+  
+  host_fa_GRCm38 : '/home/BioDatahub/pathseq/GRCm38/GRCm38.fa'
+  host_img_GRCm38 : '/home/BioDatahub/pathseq/GRCm38/GRCm38.fa.img'
+  host_kmer_GRCm38 : '/home/BioDatahub/pathseq/GRCm38/GRCm38.hss'
+  
+  microbe_dict : '/data/rawdata/GM/project/mic_neoantigen/BioDatahub/microbiome_v7/pathseq_custom_V7_fixed.dict'
+  microbe_img : '/data/rawdata/GM/project/mic_neoantigen/BioDatahub/microbiome_v7/pathseq_custom_V7_fixed.fa.img'
+  taxonomy_file : '/data/rawdata/GM/project/mic_neoantigen/BioDatahub/microbiome_v7/pathseq_custom_V7_fixed.db'
+  ncid2microbeNames_file : '/data/rawdata/GM/project/mic_neoantigen/BioDatahub/microbiome_v7/pathseq_custom_V7_fixed_microbeNames_sep=tab.csv'
+  microbial_genome_length : '/data/rawdata/GM/project/mic_neoantigen/BioDatahub/microbiome_v7/pathseq_custom_V7_fixed_GenomeLength.csv'
+  tax_id_hierarchy : '/data/rawdata/GM/project/mic_neoantigen/BioDatahub/microbiome_v7/V7_taxid_hierarchy.txt'
+  catalog_genome : '/data/rawdata/GM/project/mic_neoantigen/BioDatahub/microbiome_v7/V7_catalog_genome.txt'
+  
+  java17 : '/data/rawdata/GM/.conda/envs/java17/bin/java'
+  gatk_4.6_jar : '/data/rawdata/GM/project/mic_neoantigen/BioSoftware/gatk-4.6.0.0/gatk-package-4.6.0.0-local.jar'
+  fastp : '/data/rawdata/GM/.conda/envs/RNA-seq/bin/fastp'
+
+  #hlahd path
+  freq_data_dir : '/data/rawdata/GM/project/mic_neoantigen/BioSoftware/hlahd1.7.0_new/hlahd.1.7.0/freq_data/'
+  HLA_gene : '/data/rawdata/GM/project/mic_neoantigen/BioSoftware/hlahd1.7.0_new/hlahd.1.7.0/HLA_gene.split.txt'
+  dictionary : '/data/rawdata/GM/project/mic_neoantigen/BioSoftware/hlahd1.7.0_new/hlahd.1.7.0/dictionary/'
+  picard_path : "/data/rawdata/GM/project/mic_neoantigen/BioSoftware/hlahd1.7.0_new/picard.jar"
+  hla_gen : "/data/rawdata/GM/project/mic_neoantigen/BioSoftware/hlahd1.7.0_new/hla_gen/hla_gen"
+
+  #pvacbind path
+  sif_file : '/home/data/BioSoftware/pvactools/pvactools.4.0.3.sif'
+  pvacbind : '/data/rawdata/GM/.conda/envs/pvactools/bin/pvacbind'
+  iedb-install-directory : '/data/rawdata/GM/project/pkgs/IEDB/'
+  
+#配置数据库
+database:
+  db_dir : "/data/rawdata/GM/project/mic_neoantigen/database/protein_v7/custom_protein_V3" #blast数据库路径,路径要精确到数据库文件的前缀(例如refseq_select_prot.xx.xxx的前缀是refseq_select_prot)
+  outfmt : "\"6 qseqid sseqid qseq sseq stitle pident length mismatch gapopen evalue bitscore\"" #blastx搜索结果格式
+  
