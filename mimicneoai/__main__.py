@@ -45,6 +45,10 @@ def _run_immunogenicity_prediction(rest: List[str]) -> int:
     from mimicneoai.immunogenicity_prediction.cli import main as pred_main
     return _call_main(pred_main, rest)
 
+def _run_mimicry(rest: List[str]) -> int:
+    from mimicneoai.mimicry.cli import main as mimicry_main
+    return _call_main(mimicry_main, rest)
+
 def main(argv: List[str] | None = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
 
@@ -57,6 +61,11 @@ def main(argv: List[str] | None = None) -> int:
     subparsers.add_parser("microbial",          help="Run the microbial pipeline")
     subparsers.add_parser("mutation-derived",   help="Run the mutation-derived pipeline")
     subparsers.add_parser("immunogenicity-prediction", help="Run immunogenicity prediction subtool")
+    subparsers.add_parser(
+        "mimicry",
+        help="Find cross-source sequence mimicry candidates",
+        add_help=False,
+    )
 
     # 关键：用 parse_known_args，保留未知参数给子命令
     args, rest = parser.parse_known_args(argv)
@@ -72,6 +81,8 @@ def main(argv: List[str] | None = None) -> int:
         return _run_mutation_derived(rest)
     if args.command == "immunogenicity-prediction":
         return _run_immunogenicity_prediction(rest)
+    if args.command == "mimicry":
+        return _run_mimicry(rest)
 
     parser.print_help()
     return 1

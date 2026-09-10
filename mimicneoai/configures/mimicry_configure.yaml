@@ -1,0 +1,25 @@
+# The method identifier records the sequence-matching thresholds used for the
+# analysis. These thresholds are not configured separately for individual runs.
+method: "sequence_mimicry_v1.2"
+
+# One TSV row per patient and antigen source. Relative paths in both this YAML
+# and the input manifest are resolved from the file containing them.
+input_manifest: "<project_root>/mimicry_inputs.tsv"
+output_dir: "<project_root>/mimicry_output"
+
+# Select one or more supported within-patient cross-source comparisons.
+source_pairs:
+  - "microbial--mutation-derived"
+  - "microbial--cryptic"
+  - "cryptic--mutation-derived"
+
+workers: 8
+# Shards are resumable search units. Large values increase parallelism for a
+# single comparison but also rebuild the search index more often.
+shard_count: 2
+
+# Optional assessment of shared predicted HLA-I binding using existing
+# MimicNeoAI merged binding tables. This does not change the sequence-similar
+# pair set. When enabled, every input-manifest row must provide binding_path.
+binding_support:
+  enabled: false

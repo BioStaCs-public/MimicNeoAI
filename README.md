@@ -6,8 +6,10 @@
 
 MimicNeoAI is a research toolkit for constructing and evaluating tumor antigen
 candidates from sequencing data. It provides separate workflows for microbial,
-sORF-encoded cryptic, and mutation-derived antigens, followed by a shared
-peptide-HLA binding backend and source-specific immunogenicity models.
+sORF-encoded cryptic, and mutation-derived antigens, followed by HLA-binding
+prediction, source-specific immunogenicity assessment, and cross-source peptide
+sequence matching. Pairs for which both peptides are predicted to bind the same
+patient HLA-I allele are reported as predicted mimicry candidates.
 
 The software preserves the evidence and exclusion status of each candidate.
 Unsupported HLA alleles, failed predictors, scale-gated samples, and candidates
@@ -16,9 +18,8 @@ that do not pass a routing threshold are not silently labeled as non-binders.
 ## Project Status
 
 MimicNeoAI is research beta software. Install it from source and record the Git
-commit used for each analysis. A portable container image and a dedicated
-molecular-mimicry command are planned but are not part of the current public
-command-line interface.
+commit used for each analysis. A portable container image is planned but is not
+currently distributed as part of the public release.
 
 ## Workflows
 
@@ -28,10 +29,13 @@ command-line interface.
 | Cryptic antigen | Tumor RNA FASTQ, preferably with matched-normal RNA | Expression-, ORF-, mapping-, and junction-supported cryptic peptide Core | [Cryptic pipeline](mimicneoai/cryptic_pipeline/README.md) |
 | Mutation-derived antigen | Matched tumor-normal WES FASTQ | Event-level mutant peptides with matched-WT controls | [Mutation-derived pipeline](mimicneoai/mutation_derived_pipeline/README.md) |
 | Immunogenicity prediction | Peptide-HLA table | Source-specific immunogenicity scores and input QC | [Immunogenicity prediction](mimicneoai/immunogenicity_prediction/README.md) |
+| Molecular mimicry | Quality-controlled HLA-I candidate tables from two or more antigen sources, with optional binding results | Within-patient sequence-similar pairs and predicted mimicry candidates | [Molecular mimicry](mimicneoai/mimicry/README.md) |
 
-All workflows use HLA-I peptides of 8-11 amino acids and HLA-II peptides of
-13-17 amino acids in the packaged configuration. The native binding backend is
-documented separately in the [binding prediction guide](mimicneoai/functions/binding_prediction/README.md).
+The antigen workflows use HLA-I peptides of 8–11 amino acids and HLA-II
+peptides of 13–17 amino acids in the packaged configuration. Molecular
+mimicry analysis is currently restricted to 8–11-aa HLA-I candidates. The native
+binding backend is documented separately in the
+[binding prediction guide](mimicneoai/functions/binding_prediction/README.md).
 
 ## Installation
 
@@ -87,6 +91,7 @@ Copy a workflow configuration and replace the example paths and sample names:
 cp mimicneoai/configures/microbial_configure.yaml microbial.run.yaml
 cp mimicneoai/configures/cryptic_configure.yaml cryptic.run.yaml
 cp mimicneoai/configures/mutation_derived_configure.yaml mutation.run.yaml
+cp mimicneoai/configures/mimicry_configure.yaml mimicry.run.yaml
 ```
 
 Run a workflow with its analysis configuration and the shared tool/reference
@@ -104,6 +109,9 @@ mimicneoai cryptic \
 mimicneoai mutation-derived \
   -c mutation.run.yaml \
   -p mimicneoai/configures/paths.yaml
+
+mimicneoai mimicry \
+  -c mimicry.run.yaml
 ```
 
 The example YAML files are templates, not universal production settings.
@@ -155,10 +163,11 @@ presentation, T-cell recognition, or clinical immunogenicity. RNA-only support
 for a cryptic or microbial peptide should not be described as DNA-confirmed,
 somatic, or naturally presented without independent evidence.
 
-The planned molecular-mimicry module will consume frozen, provenance-preserving
-peptide sets from these workflows. Until that interface is released, mimicry
-analysis remains a downstream project-level analysis rather than a public
-MimicNeoAI CLI command.
+The molecular-mimicry module connects candidate repertoires across antigen
+sources through within-patient peptide sequence comparison. It reports
+sequence-similar pairs and, when binding results are available, identifies
+predicted mimicry candidates supported by binding of both peptides to the same
+patient HLA-I allele.
 
 ## Repository Layout
 
@@ -168,6 +177,7 @@ mimicneoai/
 ├── cryptic_pipeline/              # sORF-encoded cryptic antigens
 ├── microbial_pipeline/            # Microbial antigens
 ├── mutation_derived_pipeline/     # Somatic mutation-derived antigens
+├── mimicry/                        # Cross-source peptide sequence matching
 ├── functions/binding_prediction/  # Shared native binding backend
 ├── immunogenicity_prediction/     # Runtime API, models, and benchmarks
 └── example/                       # Small module-level examples
@@ -181,6 +191,7 @@ Focused regression suites can be run with the standard library test runner:
 python -m unittest discover -v mimicneoai/cryptic_pipeline/tests
 python -m unittest discover -v mimicneoai/microbial_pipeline/tests
 python -m unittest discover -v mimicneoai/functions/binding_prediction/tests
+python -m unittest discover -v mimicneoai/mimicry/tests
 ```
 
 Several end-to-end stages require licensed predictors and large reference

@@ -72,5 +72,6 @@ mimicneoai = [
   "immunogenicity_prediction/*.R",
   "immunogenicity_prediction/resources/*",
   "immunogenicity_prediction/resources/hla_pseudoseq/*.md",
-  "immunogenicity_prediction/resources/hla_pseudoseq/*.py"
+  "immunogenicity_prediction/resources/hla_pseudoseq/*.py",
+  "mimicry/*.md"
 ]
