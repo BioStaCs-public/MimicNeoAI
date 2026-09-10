@@ -29,7 +29,29 @@ import os
 import sys
 import argparse
 import gzip
-from mimicneoai.functions.nodemon_pool import NoDaemonPool
+import multiprocessing
+import multiprocessing.pool
+
+try:
+    from mimicneoai.functions.nodemon_pool import NoDaemonPool
+except ModuleNotFoundError as exc:
+    # Allow direct script execution from repo checkout without editable install.
+    if getattr(exc, "name", "") != "mimicneoai":
+        raise
+
+    class _NoDaemonProcess(multiprocessing.Process):
+        def _get_daemon(self):
+            return False
+
+        def _set_daemon(self, value):
+            pass
+
+        daemon = property(_get_daemon, _set_daemon)
+
+    class NoDaemonPool(multiprocessing.pool.Pool):
+        @staticmethod
+        def Process(_, *args, **kwargs):
+            return _NoDaemonProcess(*args, **kwargs)
 
 # -------- I/O helpers --------
 def ensure_dir(p):
@@ -166,7 +188,8 @@ def pvacbind_one_chunk(sample, chunk_idx, chunk_fa, hla_csv,
         f"{chunk_fa} {sample} {hla_csv} {algos_all} {out_dir} "
         f"-e1 {e1_lengths} -e2 {e2_lengths} "
         f"--iedb-install-directory /opt/iedb "
-        f"-t 1 --fasta-size 100000"
+        f"-t 1 --fasta-size 100000 "
+        f"< /dev/null"
     )
     run_cmd(cmd)
 

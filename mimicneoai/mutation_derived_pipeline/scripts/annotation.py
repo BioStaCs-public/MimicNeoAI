@@ -5,6 +5,45 @@ import gzip
 import shlex
 from typing import List
 
+
+def _resolve_vep_plugin_mount(vep_data_dir: str, plugins_value: str):
+    """
+    Resolve the host bind and in-container plugin directory for VEP plugins.
+
+    `plugins_value` may be either:
+      - a simple directory name such as ``VEP_plugins-release-110``
+      - a relative path under ``vep_data_dir``
+      - an absolute host path
+    """
+    vep_data_path = Path(vep_data_dir).expanduser().resolve()
+    plugins_raw = (plugins_value or "VEP_plugins-release-110").strip()
+    plugins_path = Path(plugins_raw).expanduser()
+
+    if plugins_path.is_absolute():
+        host_plugins_dir = plugins_path.resolve()
+        fallback_under_vep_data = (vep_data_path / host_plugins_dir.name).resolve()
+        # Be forgiving with stale absolute paths: if the configured absolute plugin
+        # path points outside vep_data, but vep_data contains a same-named plugin
+        # directory, prefer the colocated copy under vep_data.
+        if (
+            host_plugins_dir != fallback_under_vep_data
+            and fallback_under_vep_data.exists()
+        ):
+            host_plugins_dir = fallback_under_vep_data
+    else:
+        host_plugins_dir = (vep_data_path / plugins_path).resolve()
+
+    try:
+        rel_plugins_dir = host_plugins_dir.relative_to(vep_data_path)
+    except ValueError:
+        return str(host_plugins_dir), "/vep_plugins/"
+
+    rel_plugins_dir_str = rel_plugins_dir.as_posix().strip("/")
+    if not rel_plugins_dir_str:
+        return str(host_plugins_dir), "/vep_data/"
+    return str(host_plugins_dir), f"/vep_data/{rel_plugins_dir_str}/"
+
+
 def _open_text_auto(path: str, mode: str):
     """
     Open a text file transparently for .gz or plain files.
@@ -107,10 +146,14 @@ def annotation_vcf(run_sample_id, sample, tool, paths, configure):
     hg38_ref_dir = str(ref_fasta_path.parent)
     ref_name = ref_fasta_path.name
 
-    plugins_version = (
+    plugins_value = (
         paths.get("database", {})
              .get("neoantigen", {})
              .get("VEP_PLUGINS_VERSION", "VEP_plugins-release-110")
+    )
+    host_plugins_dir, container_plugins_dir = _resolve_vep_plugin_mount(
+        vep_data_dir,
+        plugins_value,
     )
 
     output_dir = configure["path"]["output_dir"].rstrip("/")
@@ -134,6 +177,11 @@ def annotation_vcf(run_sample_id, sample, tool, paths, configure):
 
     abs_input_vcfgz = f"{data_dir}{sample}.{suffix}.vcf.gz"
     tool.write_log(f"Annotation input VCF: {abs_input_vcfgz}", "info")
+    tool.write_log(f"VEP plugin setting: {plugins_value}", "info")
+    tool.write_log(
+        f"VEP plugin bind: {host_plugins_dir} -> {container_plugins_dir}",
+        "info",
+    )
     tool.judge_then_exec(run_sample_id, f"test -s {shlex.quote(abs_input_vcfgz)}", abs_input_vcfgz)
 
     input_file = f"/data_dir/{sample}.{suffix}.vcf.gz"
@@ -161,6 +209,7 @@ def annotation_vcf(run_sample_id, sample, tool, paths, configure):
         "-B", f"{vep_dir}:/output_dir/",
         "-B", f"{data_dir}:/data_dir/",
         "-B", f"{vep_data_dir}:/vep_data/",
+        "-B", f"{host_plugins_dir}:{container_plugins_dir}",
         "-B", f"{hg38_ref_dir}:/fasta_data/",
         human_vep_sif,
         "vep",
@@ -169,7 +218,7 @@ def annotation_vcf(run_sample_id, sample, tool, paths, configure):
         "--output_file", output_file_vep,
         "--dir_cache", "/vep_data/",
         f"--fasta=/fasta_data/{ref_name}",
-        f"--dir_plugins=/vep_data/{plugins_version}/",
+        f"--dir_plugins={container_plugins_dir}",
     ] + vep_options.split()
 
     cmd_vep = " ".join(shlex.quote(x) for x in cmd_vep_args)

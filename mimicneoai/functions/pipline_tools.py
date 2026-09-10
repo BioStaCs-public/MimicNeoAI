@@ -2,10 +2,144 @@
 import os
 import yaml
 import logging
+import re
+import shlex
 import subprocess
 from datetime import datetime, timedelta
 from typing import Any, Optional, Dict, List, Union
 from pathlib import Path
+
+
+def raise_for_failed_samples(async_results) -> None:
+    """Raise after all submitted sample jobs have finished if any job failed."""
+
+    failures = []
+    for sample, result in async_results:
+        try:
+            result.get()
+        except Exception as exc:
+            failures.append((str(sample), exc))
+
+    if failures:
+        details = "; ".join(
+            f"{sample}: {type(exc).__name__}: {exc}"
+            for sample, exc in failures
+        )
+        raise RuntimeError(
+            f"{len(failures)} sample pipeline job(s) failed: {details}"
+        )
+
+
+def sanitize_command_label(label: str) -> str:
+    """Return a short filesystem-safe label for per-command log files."""
+
+    cleaned = re.sub(r"[^A-Za-z0-9._+-]+", "_", str(label).strip())
+    cleaned = cleaned.strip("_")
+    return (cleaned or "cmd")[:120]
+
+
+def _command_tokens(cmd: str) -> list[str]:
+    try:
+        return shlex.split(cmd)
+    except ValueError:
+        return cmd.strip().split()
+
+
+def _script_label(path: str) -> str:
+    name = Path(path).name
+    for suffix in (".py", ".sh", ".pl", ".R"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name or "cmd"
+
+
+def infer_command_display_name(cmd: str, pipline: Optional[str] = None) -> str:
+    """Infer a user-facing command label when the caller did not provide one."""
+
+    tokens = _command_tokens(cmd)
+    if not tokens:
+        return "cmd"
+
+    lower_cmd = cmd.lower()
+    if "bwa mem" in lower_cmd and "samtools sort" in lower_cmd:
+        return "BWA alignment and sort"
+    if "vardict-java" in lower_cmd:
+        return "VarDict variant calling"
+    if "configmanta" in lower_cmd:
+        return "Manta configuration"
+    if "configurestrelkasomaticworkflow" in lower_cmd:
+        return "Strelka2 configuration"
+    if "runworkflow.py" in lower_cmd:
+        return "Workflow execution"
+    if "hlahd.sh" in lower_cmd:
+        return "HLA-HD typing"
+    if "annotatepeaks.pl" in lower_cmd:
+        return "HOMER annotatePeaks"
+    if "diamond" in lower_cmd and "blastx" in lower_cmd:
+        return "DIAMOND blastx"
+    if "blastx" in lower_cmd:
+        return "BLASTX peptide annotation"
+    if "minimap2" in lower_cmd:
+        return "minimap2 ORF genome mapping"
+    if "pvacseq" in lower_cmd:
+        return "pVACtools pvacseq"
+    if "pvacbind" in lower_cmd:
+        return "pVACtools pvacbind"
+
+    first = Path(tokens[0]).name
+    if first in {"python", "python3", "python3.10", "python3.9", "python2"}:
+        for token in tokens[1:]:
+            if token.endswith(".py"):
+                return _script_label(token)
+        return first
+    if first in {"bash", "sh"}:
+        for token in tokens[1:]:
+            if token.endswith((".py", ".sh")):
+                return _script_label(token)
+        return first
+    if first == "java":
+        gatk_tools = {
+            "MarkDuplicatesSpark",
+            "BaseRecalibratorSpark",
+            "ApplyBQSRSpark",
+            "Mutect2",
+            "FilterMutectCalls",
+            "GetPileupSummaries",
+            "CalculateContamination",
+            "LearnReadOrientationModel",
+            "PathSeqPipelineSpark",
+        }
+        for token in tokens:
+            if token in gatk_tools:
+                return f"GATK {token}"
+        return "java"
+    if first == "fastp":
+        return "fastp QC"
+    if first == "bowtie2":
+        return "Bowtie2 alignment"
+    if first == "bwa":
+        return f"BWA {tokens[1]}" if len(tokens) > 1 else "BWA"
+    if first == "samtools":
+        return f"samtools {tokens[1]}" if len(tokens) > 1 else "samtools"
+    if first == "bcftools":
+        return f"bcftools {tokens[1]}" if len(tokens) > 1 else "bcftools"
+    if first == "bamdst":
+        return "bamdst QC"
+    if first == "stringtie":
+        return "StringTie transcript assembly"
+    if first == "salmon":
+        return "Salmon quantification"
+    if first == "STAR":
+        return "STAR alignment"
+    if first == "rm":
+        return "Clean intermediate files"
+    if first == "mkdir":
+        return "Prepare output directory"
+    if first == "mv":
+        return "Move output files"
+    if first == "cp":
+        return "Copy output files"
+    return first
 
 
 class tools:
@@ -29,7 +163,9 @@ class tools:
         self.log_lock = log_lock
 
         # Logging paths (timestamped session)
-        self.start_date = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+        now = datetime.now()
+        self.start_date = now.strftime("%Y-%m-%d_%H:%M:%S")
+        logger_token = now.strftime("%Y%m%d%H%M%S%f")
         self.start_log = f"{self.sys_path}log/{self.start_date}/{self.log_type}_start_{self.start_date}.log"
         self.cmd_log_dir = f"{self.sys_path}log/{self.start_date}/detail/"
 
@@ -37,8 +173,9 @@ class tools:
         self.mkdir(f"{self.sys_path}log/{self.start_date}")
 
         # Configure logger
-        self.logger = logging.getLogger(f"pipeline_logger::{self.start_date}::{self.log_type}")
+        self.logger = logging.getLogger(f"pipeline_logger::{self.start_date}::{logger_token}::{self.log_type}::{id(self)}")
         self.logger.setLevel(logging.DEBUG)
+        self.logger.propagate = False
 
         # Avoid duplicate handlers if multiple instances are created
         if not self.logger.handlers:
@@ -84,6 +221,7 @@ class tools:
         flag: Optional[Any] = None,
         env: Optional[Dict[str, str]] = None,
         pipline: Optional[str] = None,
+        display_name: Optional[str] = None,
     ) -> None:
         """
         Execute a shell command and track its status.
@@ -95,49 +233,61 @@ class tools:
             env: Environment variables to use for this command (inherits default if None).
             pipline: Optional pipeline tag affecting how the command name is parsed.
         """
-        # Derive a lightweight command label for logging
-        try:
-            parts = cmd.strip().split()
-            if pipline == "cryptic":
-                base = parts[1] if len(parts) > 1 else parts[0]
-            else:
-                base = parts[0]
-            cmd_name = Path(base).name.replace(".py", "")
-        except Exception:
-            cmd_name = "cmd"
-
+        cmd_name = display_name or infer_command_display_name(cmd, pipline=pipline)
+        file_label = sanitize_command_label(cmd_name)
         if flag is not None:
-            cmd_name = f"{cmd_name}_{flag}"
+            flag_label = Path(str(flag)).name if "/" in str(flag) else str(flag)
+            cmd_name = f"{cmd_name} [{flag_label}]"
+            file_label = f"{file_label}_{sanitize_command_label(flag_label)}"
 
         # Per-sample log path
-        current_date = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
-        self.cmd_log = f"{self.sys_path}log/{self.start_date}/detail/{sample}/{current_date}_{self.log_type}_{cmd_name}.log"
+        current_date = datetime.now().strftime("%Y-%m-%d_%H:%M:%S.%f")
+        cmd_log = f"{self.sys_path}log/{self.start_date}/detail/{sample}/{current_date}_{self.log_type}_{file_label}.log"
         self.mkdir(f"{self.sys_path}log/{self.start_date}/detail/{sample}/")
 
         # Mark as running
         with self.log_lock:
-            self.status(self.run_cmds_allSamples, sample, f"{cmd_name}", "run", "", cmd)
+            self.status(self.run_cmds_allSamples, sample, f"{cmd_name}", "run", "", cmd, detail_log=cmd_log)
 
         start = datetime.now()
-        with open(self.cmd_log, "a") as logfile:
-            result = subprocess.call(
-                cmd,
-                shell=True,
-                stdout=logfile,
-                stderr=logfile,
-                env=(env if env is not None else self.default_env),
-            )
-        end = datetime.now()
+        try:
+            with open(cmd_log, "a") as logfile:
+                result = subprocess.call(
+                    f"set -o pipefail\n{cmd}",
+                    shell=True,
+                    executable="/bin/bash",
+                    stdout=logfile,
+                    stderr=logfile,
+                    env=(env if env is not None else self.default_env),
+                )
+            run_time = self.print_time(datetime.now() - start)
+            if result:
+                with self.log_lock:
+                    self.status(
+                        self.failed_cmds_allSamples,
+                        sample,
+                        f"{cmd_name}",
+                        "failed",
+                        run_time,
+                        cmd,
+                        detail_log=cmd_log,
+                    )
+                raise subprocess.CalledProcessError(result, cmd)
 
-        # Update status
-        if sample in self.run_cmds_allSamples and f"{cmd_name}" in self.run_cmds_allSamples[sample]:
-            self.run_cmds_allSamples[sample].remove(f"{cmd_name}")
-
-        run_time = self.print_time(end - start)
-        if result:
-            self.status(self.failed_cmds_allSamples, sample, f"{cmd_name}", "failed", run_time, cmd)
-        else:
-            self.status(self.done_cmds_allSamples, sample, f"{cmd_name}", "done", run_time, cmd)
+            with self.log_lock:
+                self.status(
+                    self.done_cmds_allSamples,
+                    sample,
+                    f"{cmd_name}",
+                    "done",
+                    run_time,
+                    cmd,
+                    detail_log=cmd_log,
+                )
+        finally:
+            with self.log_lock:
+                if sample in self.run_cmds_allSamples and cmd_name in self.run_cmds_allSamples[sample]:
+                    self.run_cmds_allSamples[sample].remove(cmd_name)
 
     def judge_then_exec(
         self,
@@ -146,14 +296,22 @@ class tools:
         file: str,
         flag: Optional[Any] = None,
         env: Optional[Dict[str, str]] = None,
+        display_name: Optional[str] = None,
     ) -> None:
         """
         Conditionally execute a command if the specified output file is missing or empty.
         """
         if (not os.path.exists(file)) or (os.path.isfile(file) and os.path.getsize(file) == 0):
-            self.exec_cmd(cmd, sample, flag, env=(env if env is not None else self.default_env))
+            self.exec_cmd(
+                cmd,
+                sample,
+                flag,
+                env=(env if env is not None else self.default_env),
+                display_name=display_name,
+            )
         else:
-            self.logger.warning(f"{file} already exists!")
+            label = display_name or infer_command_display_name(cmd)
+            self.logger.warning(f"{label} skipped because output already exists: {file}")
 
     def exec_cmd_with_time(
         self,
@@ -161,6 +319,7 @@ class tools:
         sample: str,
         timeout: int = 3600,
         env: Optional[Dict[str, str]] = None,
+        display_name: Optional[str] = None,
     ) -> None:
         """
         Execute a command with a timeout.
@@ -171,22 +330,31 @@ class tools:
             timeout: Timeout in seconds (default: 3600).
             env: Optional environment for the command.
         """
-        parts = cmd.strip().split()
-        base = parts[0] if parts else "cmd"
-        cmd_name = Path(base).name
+        cmd_name = display_name or infer_command_display_name(cmd)
+        file_label = sanitize_command_label(cmd_name)
 
-        current_date = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
-        self.cmd_log = f"{self.sys_path}log/{self.start_date}/detail/{sample}/{current_date}_{self.log_type}_{cmd_name}.log"
+        current_date = datetime.now().strftime("%Y-%m-%d_%H:%M:%S.%f")
+        cmd_log = f"{self.sys_path}log/{self.start_date}/detail/{sample}/{current_date}_{self.log_type}_{file_label}.log"
         self.mkdir(f"{self.sys_path}log/{self.start_date}/detail/{sample}/")
 
-        self.status(self.run_cmds_allSamples, sample, f"{cmd_name} timeout={timeout}", "run", "", cmd)
+        with self.log_lock:
+            self.status(
+                self.run_cmds_allSamples,
+                sample,
+                f"{cmd_name} timeout={timeout}",
+                "run",
+                "",
+                cmd,
+                detail_log=cmd_log,
+            )
         start = datetime.now()
 
         try:
-            with open(self.cmd_log, "a") as logfile:
+            with open(cmd_log, "a") as logfile:
                 result = subprocess.run(
-                    cmd,
+                    f"set -o pipefail\n{cmd}",
                     shell=True,
+                    executable="/bin/bash",
                     stdout=logfile,
                     stderr=logfile,
                     timeout=timeout,
@@ -196,18 +364,49 @@ class tools:
             run_time = self.print_time(end - start)
 
             if result.returncode != 0:
-                self.status(self.failed_cmds_allSamples, sample, f"{cmd_name}", "failed", run_time, cmd)
-            else:
-                self.status(self.done_cmds_allSamples, sample, f"{cmd_name}", "done", run_time, cmd)
+                with self.log_lock:
+                    self.status(
+                        self.failed_cmds_allSamples,
+                        sample,
+                        f"{cmd_name}",
+                        "failed",
+                        run_time,
+                        cmd,
+                        detail_log=cmd_log,
+                    )
+                raise subprocess.CalledProcessError(result.returncode, cmd)
+
+            with self.log_lock:
+                self.status(
+                    self.done_cmds_allSamples,
+                    sample,
+                    f"{cmd_name}",
+                    "done",
+                    run_time,
+                    cmd,
+                    detail_log=cmd_log,
+                )
 
         except subprocess.TimeoutExpired:
             end = datetime.now()
             run_time = self.print_time(end - start)
-            self.status(self.failed_cmds_allSamples, sample, f"{cmd_name}", "timeout", run_time, cmd)
+            with self.log_lock:
+                self.status(
+                    self.failed_cmds_allSamples,
+                    sample,
+                    f"{cmd_name}",
+                    "timeout",
+                    run_time,
+                    cmd,
+                    detail_log=cmd_log,
+                )
             self.logger.error(f"Command for sample '{sample}' exceeded timeout of {timeout} seconds.")
-
-        if sample in self.run_cmds_allSamples and f"{cmd_name} timeout={timeout}" in self.run_cmds_allSamples[sample]:
-            self.run_cmds_allSamples[sample].remove(f"{cmd_name} timeout={timeout}")
+            raise
+        finally:
+            running_label = f"{cmd_name} timeout={timeout}"
+            with self.log_lock:
+                if sample in self.run_cmds_allSamples and running_label in self.run_cmds_allSamples[sample]:
+                    self.run_cmds_allSamples[sample].remove(running_label)
 
     def judge_then_exec_with_time(
         self,
@@ -216,14 +415,22 @@ class tools:
         file: str,
         timeout: int = 3600,
         env: Optional[Dict[str, str]] = None,
+        display_name: Optional[str] = None,
     ) -> None:
         """
         Conditionally execute a command (with timeout) if the specified output file is missing or empty.
         """
         if (not os.path.exists(file)) or (os.path.isfile(file) and os.path.getsize(file) == 0):
-            self.exec_cmd_with_time(cmd, sample, timeout=timeout, env=(env if env is not None else self.default_env))
+            self.exec_cmd_with_time(
+                cmd,
+                sample,
+                timeout=timeout,
+                env=(env if env is not None else self.default_env),
+                display_name=display_name,
+            )
         else:
-            self.logger.warning(f"{file} already exists!")
+            label = display_name or infer_command_display_name(cmd)
+            self.logger.warning(f"{label} skipped because output already exists: {file}")
 
     # ---------------------------
     # Shared state / reporting
@@ -255,6 +462,7 @@ class tools:
         info_type: str,
         run_time: str,
         cmd: str,
+        detail_log: Optional[str] = None,
     ) -> None:
         """
         Update a status dictionary and log progress.
@@ -282,14 +490,18 @@ class tools:
 
         # Log by status type
         if info_type == "run":
+            detail_log_message = f"Detail log:\n{detail_log}\n" if detail_log else ""
             self.logger.info(
                 f"Run {sample} {info}! Progress: {self.samples.index(sample) + 1}/{len(self.samples)}.\n"
+                f"{detail_log_message}"
                 f"Detail cmd:\n{cmd}.\nRunning:\n{message}."
             )
         elif info_type == "failed":
-            self.logger.error(f"{sample} {info} failed! Time: {run_time}. Please check the corresponding log file!")
+            detail = f" Detail log: {detail_log}" if detail_log else ""
+            self.logger.error(f"{sample} {info} failed! Time: {run_time}.{detail}")
         elif info_type == "timeout":
-            self.logger.error(f"{sample} {info} exceeded timeout! Time: {run_time}.")
+            detail = f" Detail log: {detail_log}" if detail_log else ""
+            self.logger.error(f"{sample} {info} exceeded timeout! Time: {run_time}.{detail}")
         elif info_type == "done":
             self.logger.info(f"{sample} {info} succeeded! Time: {run_time}. ")
         else:
@@ -314,6 +526,14 @@ class tools:
             self.logger.info(f"all done cmds:\n{done_message}")
         if failed_message:
             self.logger.error(f"all failed cmds:\n{failed_message}")
+
+    def has_failures(self) -> bool:
+        """Return True when any sample has a recorded command failure."""
+
+        return any(
+            len(self.failed_cmds_allSamples[sample]) != 0
+            for sample in self.failed_cmds_allSamples.keys()
+        )
 
     # ---------------------------
     # Misc utilities

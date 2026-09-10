@@ -18,6 +18,8 @@ python 05-hla_typing.py \
 
 import os
 import argparse
+import shlex
+import shutil
 
 def run_cmd(cmd: str):
     """Run a shell command; raise if exit code != 0."""
@@ -33,6 +35,38 @@ def ensure_dir(p: str):
 def is_directory_empty(dir_path: str) -> bool:
     """Return True if directory does not exist or has no files."""
     return (not os.path.isdir(dir_path)) or (not os.listdir(dir_path))
+
+def is_nonempty_file(path: str) -> bool:
+    return os.path.isfile(path) and os.path.getsize(path) > 0
+
+def resolve_hlahd_script(configured_path: str, freq_data_dir: str) -> str:
+    candidates = []
+    if configured_path:
+        candidates.append(configured_path)
+    which_path = shutil.which("hlahd.sh")
+    if which_path:
+        candidates.append(which_path)
+
+    hla_root = os.path.dirname(os.path.abspath(freq_data_dir.rstrip("/")))
+    candidates.extend([
+        os.path.join(hla_root, "bin", "hlahd.sh"),
+        os.path.join(hla_root, "hlahd.sh"),
+    ])
+
+    checked = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        candidate = os.path.abspath(os.path.expanduser(candidate))
+        checked.append(candidate)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
+    raise FileNotFoundError(
+        "HLA-HD executable hlahd.sh was not found or is not executable. "
+        "Set --hlahd-bin or configure database.common.HLA.HLAHD_SCRIPT. "
+        f"Checked: {', '.join(checked)}"
+    )
 
 def build_argparser():
     ap = argparse.ArgumentParser(
@@ -50,6 +84,7 @@ def build_argparser():
     ap.add_argument("--HLA-gene",      required=True, help="HLA-HD HLA_gene file")
     ap.add_argument("--dictionary",    required=True, help="HLA-HD dictionary directory")
     ap.add_argument("--hla-gen",       required=True, help="Bowtie2 index prefix (-x)")
+    ap.add_argument("--hlahd-bin", default="", help="Path to HLA-HD hlahd.sh")
     return ap
 
 def main():
@@ -65,17 +100,17 @@ def main():
     HLA_gene      = args.HLA_gene
     dictionary    = args.dictionary
     hla_gen       = args.hla_gen
+    hlahd_bin     = resolve_hlahd_script(args.hlahd_bin, freq_data_dir)
+    hlahd_bin_dir = os.path.dirname(hlahd_bin)
 
     # Output layout
     output_hla = f"{output_path}/{step_name}/"
     fastq_dir  = f"{output_hla}/{sample}/fastq/"
     ensure_dir(fastq_dir)
 
-    # 1) Map to HLA reference with bowtie2 → keep mapped pairs with samtools → convert back to FASTQ
-    #    Note: some bowtie2 versions use -S (stdout SAM) instead of -o (output path). Detect and fallback.
-    cmd_1 = f"bowtie2 -p {thread} -x {hla_gen} -1 {r1} -2 {r2} -o {fastq_dir}/{sample}.hlamap.sam"
-    if os.system("bowtie2 -h 2>&1 | grep -q ' -o '") != 0:
-        cmd_1 = f"bowtie2 -p {thread} -x {hla_gen} -1 {r1} -2 {r2} -S {fastq_dir}/{sample}.hlamap.sam"
+    # 1) Map to HLA reference with bowtie2, keep mapped pairs, then convert back to FASTQ.
+    # Keep this command contract aligned with mimicneoai.functions.hlatyping.
+    cmd_1 = f"bowtie2 -p {thread} -x {hla_gen} -1 {r1} -2 {r2} -S {fastq_dir}/{sample}.hlamap.sam"
 
     cmd_2 = f"samtools view -@ {thread} -h -F 4 {fastq_dir}/{sample}.hlamap.sam > {fastq_dir}/{sample}.mapped.sam"
     cmd_3 = (
@@ -98,20 +133,26 @@ def main():
     cmd_5 = f"cat {fastq_dir}/{sample}.hlatmp.2.fastq |awk {awk_cmd_2} > {fastq_dir}/{sample}.hla.2.fastq"
 
     # 3) Run HLA-HD main workflow
+    hla_r1 = f"{fastq_dir}/{sample}.hla.1.fastq"
+    hla_r2 = f"{fastq_dir}/{sample}.hla.2.fastq"
     cmd_6 = (
-        f"hlahd.sh -t {thread} -m 30 -f {freq_data_dir} "
-        f"{fastq_dir}/{sample}.hla.1.fastq {fastq_dir}/{sample}.hla.2.fastq "
+        f"PATH={shlex.quote(hlahd_bin_dir)}:$PATH {shlex.quote(hlahd_bin)} "
+        f"-t {thread} -f {freq_data_dir} "
+        f"{hla_r1} {hla_r2} "
         f"{HLA_gene} {dictionary} {sample} {output_hla}"
     )
     final_result = f"{output_hla}/{sample}/result/{sample}_final.result.txt"
 
     # Execute only if final result doesn't exist
     if not os.path.exists(final_result):
-        run_cmd(cmd_1)
-        run_cmd(cmd_2)
-        run_cmd(cmd_3)
-        run_cmd(cmd_4)
-        run_cmd(cmd_5)
+        if is_nonempty_file(hla_r1) and is_nonempty_file(hla_r2):
+            print(f"[INFO] Reuse existing HLA-HD input FASTQs: {hla_r1}, {hla_r2}", flush=True)
+        else:
+            run_cmd(cmd_1)
+            run_cmd(cmd_2)
+            run_cmd(cmd_3)
+            run_cmd(cmd_4)
+            run_cmd(cmd_5)
         run_cmd(cmd_6)
     else:
         print(f"[INFO] Skip HLA-HD (exists): {final_result}")
@@ -122,13 +163,13 @@ def main():
     exon_dir    = f"{output_hla}/{sample}/exon/"
 
     if os.path.exists(f'{fastq_dir}/{sample}.hlamap.sam'):
-        run_cmd(f"rm -f {fastq_dir}/*")
+        run_cmd(f"rm {fastq_dir}/*")
     if os.path.exists(mapfile_dir) and (not is_directory_empty(mapfile_dir)):
-        run_cmd(f"rm -f {mapfile_dir}/*")
+        run_cmd(f"rm {mapfile_dir}/*")
     if os.path.exists(intron_dir) and (not is_directory_empty(intron_dir)):
-        run_cmd(f"rm -f {intron_dir}/*")
+        run_cmd(f"rm {intron_dir}/*")
     if os.path.exists(exon_dir) and (not is_directory_empty(exon_dir)):
-        run_cmd(f"rm -f {exon_dir}/*")
+        run_cmd(f"rm {exon_dir}/*")
 
     print("[DONE] HLA typing finished.", flush=True)
 

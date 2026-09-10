@@ -26,18 +26,34 @@ def fastp(run_sample_id,sample, configure, pathes, tool):
         qc_dir = f"{output_dir}/{sample}/00.QC/{sample}/"
         
         # Create output directory if not exists
-        tool.judge_then_exec(run_sample_id,f"mkdir -p {qc_dir}",qc_dir)
+        tool.judge_then_exec(
+            run_sample_id,
+            f"mkdir -p {qc_dir}",
+            qc_dir,
+            display_name="Prepare QC directory",
+        )
 
         if pair:
             # Paired-end processing command
             cmd = f"fastp -w {thread} -i {input_dir}/{sample}/{sample}.R1.fq.gz -I {input_dir}/{sample}/{sample}.R2.fq.gz -o {qc_dir}/{sample}.QC.R1.fq.gz -O {qc_dir}/{sample}.QC.R2.fq.gz -j {qc_dir}/{sample}.fastp.json -h {qc_dir}/{sample}.fastp.html"
-            tool.judge_then_exec(run_sample_id,cmd,f"{qc_dir}/{sample}.QC.R1.fq.gz")
+            tool.judge_then_exec(
+                run_sample_id,
+                cmd,
+                f"{qc_dir}/{sample}.QC.R1.fq.gz",
+                display_name="fastp QC",
+            )
         else:
             # Single-end processing command
             cmd = f"fastp -w {thread} -i {input_dir}/{sample}/{sample}.fq.gz -o {qc_dir}/{sample}.QC.fq.gz -j {qc_dir}/{sample}.fastp.json -h {qc_dir}/{sample}.fastp.html"
-            tool.judge_then_exec(run_sample_id,cmd,f"{qc_dir}/{sample}.QC.fq.gz")
+            tool.judge_then_exec(
+                run_sample_id,
+                cmd,
+                f"{qc_dir}/{sample}.QC.fq.gz",
+                display_name="fastp QC",
+            )
         
     except Exception as e:
         error_message = traceback.format_exc()
         print(f"fastp error occurred: {error_message}")
         tool.write_log(f"fastp error occurred: {error_message}","error")
+        raise

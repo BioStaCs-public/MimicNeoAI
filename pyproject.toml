@@ -9,7 +9,7 @@ description = "MimicNeoAI: An integrated pipeline for identifying microbial, cry
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
-authors = [{ name = "Tao Chen", email = "taochencode@hotmail.com" }]
+authors = [{ name = "MimicNeoAI contributors" }]
 keywords = [
   "immunology", "immunopeptidomics", "neoantigen", "microbiome",
   "bioinformatics", "cancer", "HLA", "epitope", "pipeline"
@@ -45,6 +45,17 @@ Documentation = "https://github.com/BioStaCs-public/MimicNeoAI/blob/main/README.
 # Console entry points (installed as shell commands)
 [project.scripts]
 mimicneoai = "mimicneoai.__main__:main"
+mimicneoai-train-immunogenicity = "mimicneoai.immunogenicity_prediction.train_immunogenicity:main"
+
+[project.optional-dependencies]
+immunogenicity = [
+  "scikit-learn>=1.3",
+  "torch>=2.0"
+]
+train = [
+  "scikit-learn>=1.3",
+  "torch>=2.0"
+]
 
 [tool.setuptools]
 include-package-data = true
@@ -57,5 +68,9 @@ include = ["mimicneoai", "mimicneoai.*"]
 [tool.setuptools.package-data]
 mimicneoai = [
   "configures/*.yaml",
-  "configures/*.yml"
+  "configures/*.yml",
+  "immunogenicity_prediction/*.R",
+  "immunogenicity_prediction/resources/*",
+  "immunogenicity_prediction/resources/hla_pseudoseq/*.md",
+  "immunogenicity_prediction/resources/hla_pseudoseq/*.py"
 ]

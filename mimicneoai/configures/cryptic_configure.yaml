@@ -20,24 +20,114 @@ args:
   hla_binding_threads : 5 # Number of threads for parallel pvactools runs; too many may reduce efficiency—adjust based on server performance.
   pool_size: 1
   trinity_mem: "100G"
+
+# Pre-binding candidate selection for Cryptic Core.
+# all keeps the complete Core. ranked_cap ranks QC-passed parent ORFs and
+# keeps up to the requested unique HLA-I/HLA-II peptides; cap-external
+# candidates are deferred/not_selected, not QC failures or binding negatives.
+candidate_selection:
+  mode: "all"                    # all | ranked_cap
+  max_hla_i_peptides: null       # e.g. 400000 for Fig. 5 ranked runs
+  max_hla_ii_peptides: null      # e.g. 400000 for Fig. 5 ranked runs
+
+junction_qc:
+  enabled: false
+  policy_version: "junction_qc_v1.0"
+  star_pair_inputs: ""                 # Existing frozen STAR pair table. Takes precedence when provided.
+  auto_freeze_star_provenance: false   # If true, build a per-sample STAR pair table from current 01-star outputs.
+  star_provenance_outdir: ""           # Optional. Defaults to 01-star/star-provenance-freeze for each tumor sample.
+  full_bam_hash: false                 # Usually false; SJ/log files are hashed and BAM size is recorded.
+  allow_critical_contract_upgrade: false
+  primary_min_tumor_unique_reads: 2
+  sensitivity_thresholds: "1,2,3,5"
+
+rna_variant_editing_qc:
+  enabled: false
+  policy_version: "cryptic_rna_variant_editing_qc_v1.0"
+  rna_variant_vcf: ""                  # Defaults to 02-known/04k.bcf_consensus/rna.flt.vcf.gz when enabled.
+  rna_variant_calling_manifest: ""     # Defaults to the VCF directory's rna.variant_calling.manifest.json.
+  # Optional exploratory RNA-supported branch only. The current strict main
+  # analysis keeps this disabled and does not require REDIportal resources.
+  rediportal_processed_table: ""
+  rediportal_resource_manifest: ""
+  allow_missing_rediportal_resource: false
+  allow_legacy_rna_variant_vcf: false
+  allow_legacy_duplicate_vcf: false
+  min_read_mapping_quality: 20
+  min_base_quality: 20
+  min_variant_qual: 30
+  min_total_depth: 10
+  min_variant_allele_fraction: 0.05
+  primary_min_alt_reads: 3
+  sensitivity_alt_reads: "2,3,5"
+
 others:
   QC: true
   alignment: true
+  alignment_control: false  # Paired mode only: run STAR for matched normal to produce SJ.out.tab for junction QC.
   known: true
   novel: true
   salmon_quant: true
   salmon_quant_control: true
   hlatyping: true
   extract_aeseps: true
+  orf_genome_annotation: true
+  orf_filter: true
+  cryptic_core_qc: true
+  cryptic_external_normal_qc: false
+  allow_missing_external_normal_resources: false
   hla_binding_pred: true
 
   min_tpm_tumor: 5.0
   max_tpm_ctrl: 0.5
   min_log2fc: 4.0
+  strandedness: "reverse"  # StringTie strandedness: reverse(--rf) / forward(--fr) / none(no extra flag)
   # Algorithms for pVACbind (space-separated)
   algo: "BigMHC_EL BigMHC_IM DeepImmuno MHCflurry MHCflurryEL MHCnuggetsI MHCnuggetsII NNalign NetMHC NetMHCIIpan NetMHCIIpanEL NetMHCpan NetMHCpanEL PickPocket SMM SMMPMBEC"
-  mhcI_lengths: "8,9,10"
-  mhcII_lengths: "15"
+  mhcI_lengths: "8,9,10,11"
+  mhcII_lengths: "13,14,15,16,17"
+
+  # First reviewer-response Core implementation. Leave blank to record
+  # human-reference peptide matching as not_evaluated only when
+  # allow_missing_human_reference is true.
+  human_reference_proteome_fasta: ""
+  allow_missing_human_reference: false
+  cryptic_core_qc_policy_version: "cryptic_core_qc_v1.0"  # cryptic_core_qc_v1.0 | cryptic_core_qc_v1.1
+  coordinate_min_mapq: 20
+  reference_build: "GRCh38"
+
+  # Binding prediction backend. The reviewer-response Core uses the local
+  # peptide-core backend; set pvactools explicitly only for legacy reruns.
+  binding_prediction_backend: "mimicneoai"  # mimicneoai | pvactools
+  binding_prediction_preset: "fast"         # fast | full
+  binding_prediction_step_name: "09-hla_binding_pred_mimicneoai"
+  binding_prediction_algorithms: "MHCflurry MHCflurryEL MHCnuggetsI MHCnuggetsII NetMHCpan NetMHCpanEL NetMHCIIpan NetMHCIIpanEL"
+  binding_prediction_workers: 8
+  # Estimate task scale before materializing binding_tasks.tsv.
+  binding_prediction_max_task_rows: 5000000
+  # Set true only when an oversized sample should be predicted intentionally.
+  binding_prediction_force_large_samples: false
+  run_immunogenicity_prediction: false
+  immunogenicity_step_name: "10-immunogenicity_prediction_mimicneoai"
+  immunogenicity_python_bin: ""  # Optional override; otherwise uses MIMICNEOAI_IMMUNOGENICITY_PYTHON_BIN, then paths.yaml.
+  immunogenicity_model_root: ""  # Optional override; otherwise uses MIMICNEOAI_IMMUNOGENICITY_MODEL_ROOT, then paths.yaml.
+  immunogenicity_device: "auto"
+  immunogenicity_batch_size: 512
+  immunogenicity_workers: 8
+
+# Frozen external-normal exact-match resources for 08c. Formal runs fail closed
+# when these paths are empty, missing, or SHA-mismatched against the manifest.
+external_normal_resources:
+  policy_version: "cryptic_external_normal_qc_v1.0"  # cryptic_external_normal_qc_v1.0 | cryptic_external_normal_qc_v1.1
+  manifest: ""
+  smorf_match_index: ""
+  smorf_parent_map: ""
+  hla_ligand_match_index: ""
+  hla_ligand_evidence: ""
+  coordinate_matching_enabled: false
+  coordinate_manifest: ""
+  smorf_coordinates: ""
+  smorf_orfcds: ""
 
 samples:
   - Sample_001_T,Sample_001_N

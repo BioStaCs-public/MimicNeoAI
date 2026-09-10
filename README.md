@@ -1,102 +1,201 @@
 # MimicNeoAI
 
-MimicNeoAI is a unified toolkit for discovering **microbial epitopes**, **cryptic epitopes**, and **mutation-derived neoantigens**, and for assessing **molecular mimicry** between microbial and tumor antigens.
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-%3E%3D3.9-3776AB.svg)](pyproject.toml)
+[![Development status](https://img.shields.io/badge/status-research%20beta-orange.svg)](#project-status)
 
-It ships with three production pipelines:
+MimicNeoAI is a research toolkit for constructing and evaluating tumor antigen
+candidates from sequencing data. It provides separate workflows for microbial,
+sORF-encoded cryptic, and mutation-derived antigens, followed by a shared
+peptide-HLA binding backend and source-specific immunogenicity models.
 
-- **Microbial pipeline** (`mimicneoai/microbial_pipeline`) – host‐read depletion, microbial profiling, microbial peptide extraction, HLA binding, immunogenicity.
-- **Cryptic pipeline** (`mimicneoai/cryptic_pipeline`) – lncRNA/novel transcript reconstruction, sORF discovery, expression quantification, HLA binding, immunogenicity.
-- **Mutation-derived pipeline** (`mimicneoai/mutation_derived_pipeline`) – QC, alignment, somatic variant calling/annotation, HLA typing, pVACseq-based neoantigen discovery.
-- **Immunogenicity prediction subtool** (`mimicneoai/immunogenicity_prediction`) – standalone peptide/HLA immunogenicity scoring.
+The software preserves the evidence and exclusion status of each candidate.
+Unsupported HLA alleles, failed predictors, scale-gated samples, and candidates
+that do not pass a routing threshold are not silently labeled as non-binders.
 
-> If you use MimicNeoAI, please cite the preprint listed in **Citation** below.
+## Project Status
 
----
+MimicNeoAI is research beta software. Install it from source and record the Git
+commit used for each analysis. A portable container image and a dedicated
+molecular-mimicry command are planned but are not part of the current public
+command-line interface.
 
-## Repository Layout
+## Workflows
+
+| Workflow | Primary input | Main output | Documentation |
+|---|---|---|---|
+| Microbial antigen | Tumor RNA/WGS FASTQ, optionally paired with matched normal | Matched-normal-depleted microbial peptide Core | [Microbial pipeline](mimicneoai/microbial_pipeline/README.md) |
+| Cryptic antigen | Tumor RNA FASTQ, preferably with matched-normal RNA | Expression-, ORF-, mapping-, and junction-supported cryptic peptide Core | [Cryptic pipeline](mimicneoai/cryptic_pipeline/README.md) |
+| Mutation-derived antigen | Matched tumor-normal WES FASTQ | Event-level mutant peptides with matched-WT controls | [Mutation-derived pipeline](mimicneoai/mutation_derived_pipeline/README.md) |
+| Immunogenicity prediction | Peptide-HLA table | Source-specific immunogenicity scores and input QC | [Immunogenicity prediction](mimicneoai/immunogenicity_prediction/README.md) |
+
+All workflows use HLA-I peptides of 8-11 amino acids and HLA-II peptides of
+13-17 amino acids in the packaged configuration. The native binding backend is
+documented separately in the [binding prediction guide](mimicneoai/functions/binding_prediction/README.md).
+
+## Installation
+
+MimicNeoAI currently supports Linux and is developed and validated primarily on
+Ubuntu 22.04 with Python 3.10. The package metadata requires Python 3.9 or
+newer. The sequencing workflows also require command-line bioinformatics
+software and reference databases that are not installed by `pip`.
+
 ```bash
-mimicneoai/
-├─ configures/ # Example YAMLs for configuration and paths
-│ ├─ cryptic_configure.yaml # cryptic pipeline example
-│ ├─ immunogenicity_prediction_configure.yaml # immunogenicity prediction template
-│ ├─ microbial_configure.yaml # microbial pipeline example
-│ ├─ mutation_derived_configure.yaml # mutation-derived pipeline example
-│ └─ paths.yaml # common paths example
-├─ cryptic_pipeline/ # cryptic (sORF) pipeline
-├─ example/ # minimal test data/examples for modules
-│ └─ immunogenicity_prediction/
-│   ├─ config/ # runnable example config (Microbial_Pred)
-│   ├─ input/ # example peptide/HLA input CSV
-│   ├─ models/ # example model weights and HLA fasta
-│   └─ output/ # example prediction output
-├─ immunogenicity_prediction/ # standalone + reusable immunogenicity module
-├─ microbial_pipeline/ # microbial pipeline
-└─ mutation_derived_pipeline/ # mutation-derived pipeline
+git clone https://github.com/TaoChen-Code/MimicNeoAI.git
+cd MimicNeoAI
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+
+mimicneoai --help
 ```
 
----
+Install immunogenicity inference dependencies with:
+
+```bash
+python -m pip install -e '.[immunogenicity]'
+```
+
+PyTorch must match the host CPU or CUDA runtime. For isolated CPU and CUDA 11.8
+environments, see the [immunogenicity runtime guide](mimicneoai/immunogenicity_prediction/README.md#runtime-environment).
+
+## References and External Software
+
+Each workflow calls established third-party tools such as `fastp`, `samtools`,
+HLA-HD, GATK, VEP, STAR, Salmon, NetMHCpan, NetMHCIIpan, MHCflurry, and
+MHCnuggets. The exact requirements differ by workflow and are listed in the
+corresponding pipeline README.
+
+The optional database helper downloads the MimicNeoAI reference bundle:
+
+```bash
+mimicneoai download_database --target-dir /path/to/MimicNeoAI_database
+```
+
+Review the [database and path guide](mimicneoai/configures/Database_and_Paths.md)
+before running an analysis. Some external predictors, HLA pseudosequence files,
+reference datasets, and model payloads have their own licenses or access terms
+and are therefore not distributed in this Git repository.
 
 ## Quick Start
 
-Each pipeline has its own README with **installation**, **configuration**, and **run** instructions:
+Copy a workflow configuration and replace the example paths and sample names:
 
-- Microbial: [`mimicneoai/microbial_pipeline/README.md`](mimicneoai/microbial_pipeline/README.md)
-- Cryptic: [`mimicneoai/cryptic_pipeline/README.md`](mimicneoai/cryptic_pipeline/README.md)
-- Mutation-derived: [`mimicneoai/mutation_derived_pipeline/README.md`](mimicneoai/mutation_derived_pipeline/README.md)
-- Immunogenicity prediction: [`mimicneoai/immunogenicity_prediction/README.md`](mimicneoai/immunogenicity_prediction/README.md)
+```bash
+cp mimicneoai/configures/microbial_configure.yaml microbial.run.yaml
+cp mimicneoai/configures/cryptic_configure.yaml cryptic.run.yaml
+cp mimicneoai/configures/mutation_derived_configure.yaml mutation.run.yaml
+```
 
-Reference bundles and minimal test data:
-- **Zenodo**: https://doi.org/10.5281/zenodo.15582924
+Run a workflow with its analysis configuration and the shared tool/reference
+configuration:
 
----
+```bash
+mimicneoai microbial \
+  -c microbial.run.yaml \
+  -p mimicneoai/configures/paths.yaml
 
-## High-Level Features
+mimicneoai cryptic \
+  -c cryptic.run.yaml \
+  -p mimicneoai/configures/paths.yaml
 
-- End-to-end automation with resumable steps and structured logs
-- Modular YAML configs (sample list, runtime args, tool/resource paths)
-- HLA binding and **immunogenicity** scoring (multi-tool support)
-- Consistent output layout for downstream integration and figure generation
+mimicneoai mutation-derived \
+  -c mutation.run.yaml \
+  -p mimicneoai/configures/paths.yaml
+```
 
----
+The example YAML files are templates, not universal production settings.
+Reference paths, memory, concurrency, paired-sample mode, and project-specific
+QC resources must be reviewed before execution.
 
-## Requirements
+## Binding and Immunogenicity
 
-- Linux (tested on Ubuntu 20.04 x86_64)
-- Conda or Mamba (recommended)
-- Toolchain per pipeline (see pipeline READMEs), including:
-  - `fastp`, `samtools`, `bwa/bowtie2`
-  - `blast+` (microbial)
-  - `GATK`/`VEP` (mutation-derived)
-  - `HLA-HD` (HLA typing)
-  - `pVACtools`, IEDB predictors, and optional ML predictors (MHCflurry, MHCnuggets, BigMHC, DeepImmuno)
+The packaged workflows use the native `mimicneoai` binding backend with the
+`fast` preset by default:
 
----
+- `fast` first routes peptide-HLA pairs with NetMHCpan EL 4.2 or NetMHCIIpan EL
+  4.3, then applies the configured multi-algorithm prediction set to candidates
+  that pass Stage 1.
+- `full` applies the configured multi-algorithm prediction set without Stage 1
+  routing.
 
-## Configuration
+Stage 1 is a computational routing step, not a final binding or immunogenicity
+classification. See the [binding backend documentation](mimicneoai/functions/binding_prediction/README.md)
+for statuses, output fields, supported algorithms, and resume behavior.
 
-Copy and edit YAMLs under `mimicneoai/configures/`:
-- `*_configure.yaml`: runtime toggles, input/output roots, sample list
-- `paths.yaml`: absolute paths to references and executables
+Immunogenicity prediction is disabled by default. When enabled, MimicNeoAI uses
+independently trained source-specific models: one microbial model, one
+mutation-derived model, and a fixed ten-member cryptic ensemble. Scores from
+different antigen sources are not calibrated for direct cross-source
+comparison.
 
-Prefer absolute paths to avoid ambiguity.
+## Reproducibility
 
----
+Recent Core, binding, and immunogenicity stages write manifests with input,
+configuration, code, resource, and output identities. A result is resumed only
+when the relevant signatures match. Missing or incompatible formal resources
+fail closed where required by the workflow policy.
 
-## Reproducibility & Logging
+Older discovery stages retain stage-specific completion checks. Before
+resuming a partially completed run, inspect the stage log and output contract.
+Do not overwrite or delete a prior analysis merely to force a rerun; use a new
+output directory or archive the previous stage first.
 
-- Each step writes command and status logs under the pipeline’s working directory.
-- On reruns, **existing non-empty outputs are skipped**. If in doubt, delete incomplete products from the affected step directory before rerun.
+Zero-candidate outputs can be valid biological or QC outcomes. They should be
+interpreted from the stage manifest and summary rather than from file size
+alone.
 
----
+## Scientific Scope
 
-## License
+MimicNeoAI produces computational antigen candidates and explicit evidence
+sidecars. A predicted binder is not, by itself, evidence of natural HLA
+presentation, T-cell recognition, or clinical immunogenicity. RNA-only support
+for a cryptic or microbial peptide should not be described as DNA-confirmed,
+somatic, or naturally presented without independent evidence.
 
-See [`LICENSE`](LICENSE).
+The planned molecular-mimicry module will consume frozen, provenance-preserving
+peptide sets from these workflows. Until that interface is released, mimicry
+analysis remains a downstream project-level analysis rather than a public
+MimicNeoAI CLI command.
 
----
+## Repository Layout
+
+```text
+mimicneoai/
+├── configures/                    # Workflow and shared path templates
+├── cryptic_pipeline/              # sORF-encoded cryptic antigens
+├── microbial_pipeline/            # Microbial antigens
+├── mutation_derived_pipeline/     # Somatic mutation-derived antigens
+├── functions/binding_prediction/  # Shared native binding backend
+├── immunogenicity_prediction/     # Runtime API, models, and benchmarks
+└── example/                       # Small module-level examples
+```
+
+## Testing
+
+Focused regression suites can be run with the standard library test runner:
+
+```bash
+python -m unittest discover -v mimicneoai/cryptic_pipeline/tests
+python -m unittest discover -v mimicneoai/microbial_pipeline/tests
+python -m unittest discover -v mimicneoai/functions/binding_prediction/tests
+```
+
+Several end-to-end stages require licensed predictors and large reference
+bundles, so unit tests do not replace deployment-specific smoke testing.
 
 ## Citation
 
-**MimicNeoAI: An integrated pipeline for identifying microbial epitopes and mimicry of tumor neoepitopes**  
-Tao Chen, Wei Wang, Xiao Zuo, Yuxin Zhang, Mingwei Li, Zhilei Li, Yin He, Yanfei Zhou, Fang Ye, Bin Zhang, Qionghui Jiang, Huimin Liu, Lu Zhang, Jinman Fang, Yuanwei Zhang  
-*bioRxiv* 2025.06.13.658292; doi: https://doi.org/10.1101/2025.06.13.658292
+If you use MimicNeoAI, please cite:
+
+> Chen T, Wang W, Zuo X, et al. MimicNeoAI: An integrated pipeline for
+> identifying microbial epitopes and mimicry of tumor neoepitopes. *bioRxiv*.
+> 2025. doi: [10.1101/2025.06.13.658292](https://doi.org/10.1101/2025.06.13.658292).
+
+## License
+
+MimicNeoAI source code is released under the [Apache License 2.0](LICENSE).
+External tools, databases, pretrained models, and derived resources remain
+subject to their respective licenses and terms of use.

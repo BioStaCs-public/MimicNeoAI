@@ -1,0 +1,21 @@
+# Mutation-derived immunogenicity prediction example.
+path:
+  input_csv: "mimicneoai/example/immunogenicity_prediction/input/input_peptide_hla.csv"
+  output_csv: "mimicneoai/example/immunogenicity_prediction/output/mutation_derived_predictions.csv"
+  model_path: "mimicneoai/immunogenicity_prediction/models/default/mutation_derived/model.pth"
+  hla_source: "netmhc-pseudoseq"
+  export_onnx: ""
+
+args:
+  batch_size: 512
+  num_processes: 1
+  verbose: true
+  include_input_qc: true
+  device: "cuda"
+  export_onnx_only: false
+  onnx_opset: 17
+
+io:
+  peptide_col: "peptide"
+  hla_col: "hla"
+  score_col: "immunogenicity_score"

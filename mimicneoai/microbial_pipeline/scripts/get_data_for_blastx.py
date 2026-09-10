@@ -1,6 +1,5 @@
 import os
 import gzip
-import pysam
 import pandas as pd
 
 
@@ -33,6 +32,10 @@ def get_data(
         (catalog_genome_rank_file, tax_id_hierarchy_file, etc.).
     """
     sample = str(sample)
+    try:
+        import pysam
+    except ImportError as exc:
+        raise ImportError("pysam is required for PathSeq BAM extraction") from exc
 
     # PathSeq BAM produced by GATK PathSeqPipelineSpark
     bam_path = os.path.join(

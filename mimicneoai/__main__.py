@@ -42,7 +42,7 @@ def _run_mutation_derived(rest: List[str]) -> int:
     return _call_main(md_main, rest)
 
 def _run_immunogenicity_prediction(rest: List[str]) -> int:
-    from mimicneoai.immunogenicity_prediction.immunogenicity_prediction import main as pred_main
+    from mimicneoai.immunogenicity_prediction.cli import main as pred_main
     return _call_main(pred_main, rest)
 
 def main(argv: List[str] | None = None) -> int:

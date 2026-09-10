@@ -40,8 +40,12 @@ def parse_args():
 
 def main():
     a = parse_args()
-    fq1 = Path(a.fq1).resolve()
-    fq2 = Path(a.fq2).resolve()
+    fq1 = Path(a.fq1).expanduser()
+    fq2 = Path(a.fq2).expanduser()
+    if not fq1.is_absolute():
+        fq1 = Path.cwd() / fq1
+    if not fq2.is_absolute():
+        fq2 = Path.cwd() / fq2
     if not exists_nonempty(fq1) or not exists_nonempty(fq2):
         sys.stderr.write("[ERR] FQ1/FQ2 not found or empty\n")
         sys.exit(1)

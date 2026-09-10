@@ -18,7 +18,7 @@ Example:
     --ref-gtf /path/to/gencode.v23.annotation.gtf \
     --ref-lnc-gtf /path/to/gencode.v23.long_noncoding_RNAs.gtf \
     --bcf-mapq 20 --bcf-baseq 20 --bcf-depth-cap 100000 \
-    --bcf-qual-min 30 --bcf-dp-min 10 --bcf-mq-min 30 --bcf-af-min 0.05 \
+    --bcf-qual-min 30 --bcf-dp-min 10 --bcf-mq-min 20 --bcf-af-min 0.05 \
     --consensus-hap A
 
   python 02-lnc_sORF_pipeline.py -s <SAMPLE> -m novel -o ./novel \
@@ -27,7 +27,7 @@ Example:
     --in-bam /path/to/Aligned.out.bam
 """
 
-import argparse, os, sys, subprocess, shutil, re, time, gzip
+import argparse, os, sys, subprocess, shutil, re, time, gzip, json, hashlib
 from pathlib import Path
 from collections import Counter
 
@@ -57,7 +57,30 @@ def check_bin(name):
         sys.exit(1)
 
 
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def file_identity(path):
+    path = Path(path)
+    if not path.exists():
+        return {"path": str(path), "exists": False}
+    return {
+        "path": str(path),
+        "exists": True,
+        "size": path.stat().st_size,
+        "sha256": sha256_file(path),
+    }
+
+
 QC = []
+RNA_VARIANT_CALLING_POLICY_VERSION = "cryptic_known_branch_rna_variant_calling_v1.0"
+RNA_VARIANT_CALLING_NORMALIZATION_POLICY = "bcftools norm -f REF -m -any; bcftools norm -d exact"
+RNA_VARIANT_CALLING_FLAG_FILTER = "0xF04"  # unmapped + secondary + QC-failed + duplicate + supplementary
 
 
 def qc_add(section, kvs=None, path=None):
@@ -69,6 +92,42 @@ def qc_add(section, kvs=None, path=None):
         else:
             for k, v in kvs: QC.append(f"{k}: {v}")
     QC.append("")
+
+
+def command_version(cmd):
+    try:
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode("utf-8", errors="replace")
+        return out.splitlines()[0] if out.splitlines() else ""
+    except Exception as exc:
+        return f"unavailable:{exc.__class__.__name__}"
+
+
+def output_signature(paths):
+    return {label: file_identity(path) for label, path in paths.items()}
+
+
+def outputs_match_signature(signature):
+    if not isinstance(signature, dict):
+        return False
+    for label, expected in signature.items():
+        if not isinstance(expected, dict):
+            return False
+        path = expected.get("path")
+        if not path:
+            return False
+        observed = file_identity(path)
+        for key in ("exists", "size", "sha256"):
+            if observed.get(key) != expected.get(key):
+                return False
+    return True
+
+
+def write_json_atomic(path, payload):
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+    os.replace(tmp, path)
 
 
 # ------------------ File/text helpers ------------------
@@ -89,6 +148,31 @@ def read_gtf_tx2gene(gtf):
             gn = gn.group(1) if gn else "."
             tx2g[tid] = (gid, gn)
     return tx2g
+
+
+def gtf_attr_value(attr, key, default="."):
+    m = re.search(rf'{re.escape(key)} "([^"]+)"', attr)
+    return m.group(1) if m else default
+
+
+def iter_gtf_rows(gtf, feature=None):
+    with open(gtf, "r") as fh:
+        for line in fh:
+            if line.startswith("#"):
+                continue
+            row = line.rstrip("\n").split("\t")
+            if len(row) < 9:
+                continue
+            if feature is not None and row[2] != feature:
+                continue
+            yield row, line.rstrip("\n")
+
+
+def write_sorted_bed6(records, out_bed):
+    records = sorted(records, key=lambda x: (x[0], int(x[1]), int(x[2])))
+    with open(out_bed, "w") as fo:
+        for row in records:
+            fo.write("\t".join(map(str, row)) + "\n")
 
 
 def write_fa_with_ann(in_fa, ann_map, out_fa):
@@ -200,7 +284,9 @@ def qc_gtf_counts(gtf):
     return nt, nx
 
 
-def qc_bed_lines(bed): return sum(1 for _ in open(bed, "r"))
+def qc_bed_lines(bed):
+    with open(bed, "r") as handle:
+        return sum(1 for _ in handle)
 
 
 def qc_paf_lines(paf): return sum(1 for _ in open(paf, "r"))
@@ -257,13 +343,29 @@ def step_sort_index(in_bam, out_bam, threads):
     return out_bam
 
 
-def step_stringtie_gffcompare(sorted_bam, ref_gtf, threads, out_dir):
+def step_stringtie_gffcompare(sorted_bam, ref_gtf, threads, out_dir, strandedness="reverse"):
     log(">> [1_1] StringTie + gffcompare")
     st_gtf = str(Path(out_dir) / "stringtie.gtf")
     comp_prefix = str(Path(out_dir) / "comp")
     comp_annot = comp_prefix + ".annotated.gtf"
+
+    strand = str(strandedness).strip().lower()
+    # StringTie strandedness:
+    # reverse -> --rf
+    # forward -> --fr
+    # none    -> no extra option
+    strand_args = []
+    if strand == "reverse":
+        strand_args = ["--rf"]
+    elif strand == "forward":
+        strand_args = ["--fr"]
+    elif strand == "none":
+        strand_args = []
+    else:
+        raise ValueError(f"Invalid strandedness: {strandedness}. Use reverse/forward/none")
+
     if not exists(st_gtf):
-        run(["stringtie", sorted_bam, "-G", ref_gtf, "-o", st_gtf, "-p", threads])
+        run(["stringtie", sorted_bam, "-G", ref_gtf, "-o", st_gtf, "-p", threads, *strand_args])
     if not exists(comp_annot):
         run(["gffcompare", "-r", ref_gtf, "-o", comp_prefix, st_gtf])
     nt, nx = qc_gtf_counts(st_gtf)
@@ -277,36 +379,47 @@ def step_stringtie_gffcompare(sorted_bam, ref_gtf, threads, out_dir):
 
 def step_pick_novel(comp_annot, out_dir, class_codes="u|i|x"):
     log(f">> [1_2] Select novel ({class_codes}) and export BED")
+    ensure_dir(out_dir)
     novel_ids = str(Path(out_dir) / "novel.tx.ids")
     novel_gtf = str(Path(out_dir) / "novel_lncRNA.gtf")
     novel_bed = str(Path(out_dir) / "novel_lncRNA.transcripts.bed")
     if not exists(novel_ids):
-        awk = rf'''$0!~/^#/ && $3=="transcript" && $0~/class_code "({class_codes})"/ {{ if (match($9,/transcript_id "([^"]+)"/,m)) print m[1] }}'''
-        run(["bash", "-lc", f"awk -F'\t' '{awk}' {comp_annot} | sort -u > {novel_ids}"])
+        keep_codes = set(class_codes.split("|"))
+        ids = {
+            gtf_attr_value(row[8], "transcript_id")
+            for row, _ in iter_gtf_rows(comp_annot, feature="transcript")
+            if gtf_attr_value(row[8], "class_code") in keep_codes
+            and gtf_attr_value(row[8], "transcript_id") != "."
+        }
+        with open(novel_ids, "w") as fo:
+            for tid in sorted(ids):
+                fo.write(tid + "\n")
     n_ids = sum(1 for _ in open(novel_ids)) if exists(novel_ids) else 0
     log(f"   novel.ids: {n_ids}")
     qc_add("Step [1_2] novel.tx.ids", {"novel_transcripts": n_ids}, novel_ids)
 
     if exists(novel_ids) and not exists(novel_gtf):
-        run(["bash", "-lc",
-             f"awk -F'\t' 'NR==FNR{{keep[$1]=1;next}} $0!~/^#/ && $3==\"transcript\" {{ if (match($9,/transcript_id \"([^\"]+)\"/,m) && keep[m[1]]) print }}' {novel_ids} {comp_annot} > {novel_gtf}"])
+        keep = {line.strip() for line in open(novel_ids) if line.strip()}
+        with open(novel_gtf, "w") as fo:
+            for row, raw in iter_gtf_rows(comp_annot, feature="transcript"):
+                if gtf_attr_value(row[8], "transcript_id") in keep:
+                    fo.write(raw + "\n")
     if exists(novel_gtf):
         nt, nx = qc_gtf_counts(novel_gtf)
         log(f"   novel.gtf: transcripts={nt}, exons={nx}")
         qc_add("Step [1_2] novel_lncRNA.gtf", {"transcripts": nt, "exons": nx}, novel_gtf)
 
     if exists(novel_gtf) and not exists(novel_bed):
-        awk = r'''BEGIN{OFS="\t"}
-          $3=="transcript"{
-            tid=cc=rg=cr=".";
-            if(match($9,/transcript_id "([^"]+)"/,m)) tid=m[1];
-            if(match($9,/class_code "([^"]+)"/,m))    cc=m[1];
-            if(match($9,/ref_gene_id "([^"]+)"/,m))   rg=m[1];
-            if(match($9,/cmp_ref "([^"]+)"/,m))       cr=m[1];
-            name = tid"|"cc"|"rg"|"cr;
-            print $1, $4-1, $5, name, ".", $7
-          }'''
-        run(["bash", "-lc", f"awk -F'\t' '{awk}' {novel_gtf} | sort -k1,1 -k2,2n -k3,3n > {novel_bed}"])
+        records = []
+        for row, _ in iter_gtf_rows(novel_gtf, feature="transcript"):
+            attr = row[8]
+            tid = gtf_attr_value(attr, "transcript_id")
+            cc = gtf_attr_value(attr, "class_code")
+            rg = gtf_attr_value(attr, "ref_gene_id")
+            cr = gtf_attr_value(attr, "cmp_ref")
+            name = f"{tid}|{cc}|{rg}|{cr}"
+            records.append((row[0], int(row[3]) - 1, row[4], name, ".", row[6]))
+        write_sorted_bed6(records, novel_bed)
     if exists(novel_bed):
         lines = qc_bed_lines(novel_bed)
         log(f"   novel.bed lines: {lines}")
@@ -529,19 +642,27 @@ def step_trace_to_ref(trinity_fa, ref_fa, ref_gtf, out_dir, threads, pid_thr, co
 # ------------------ known branch: bcftools + consensus ------------------
 
 def step_gtf_to_bed_transcripts(gtf, out_bed):
-    """Export transcript records from GTF to transcript-level BED (0-based, half-open)."""
-    log(">> [4k] Generate lncRNA transcript BED from ref_lnc_gtf")
+    """Export merged lncRNA exon intervals as BED (0-based, half-open)."""
+    log(">> [4k] Generate merged lncRNA exon BED from ref_lnc_gtf")
     if not exists(out_bed):
-        awk = r'''BEGIN{OFS="\t"}
-            $0!~/^#/ && $3=="transcript"{
-              strand=$7; start=$4-1; end=$5;
-              tid="."; if(match($9,/transcript_id "([^"]+)"/,m)) tid=m[1];
-              print $1, start, end, tid, ".", strand
-            }'''
-        run(["bash", "-lc", f"awk -F'\t' '{awk}' {gtf} | sort -k1,1 -k2,2n -k3,3n > {out_bed}"])
+        intervals = []
+        for row, _ in iter_gtf_rows(gtf, feature="exon"):
+            intervals.append((row[0], int(row[3]) - 1, int(row[4])))
+        intervals.sort(key=lambda x: (x[0], x[1], x[2]))
+        merged = []
+        for chrom, start, end in intervals:
+            if not merged or merged[-1][0] != chrom or start > merged[-1][2]:
+                merged.append([chrom, start, end])
+            else:
+                merged[-1][2] = max(merged[-1][2], end)
+        records = [
+            (chrom, start, end, f"lncRNA_exon_{idx:06d}", ".", ".")
+            for idx, (chrom, start, end) in enumerate(merged, start=1)
+        ]
+        write_sorted_bed6(records, out_bed)
     lines = qc_bed_lines(out_bed) if Path(out_bed).exists() else 0
-    log(f"   lncRNA.transcripts.bed lines: {lines}")
-    qc_add("Step [4k] lncRNA.transcripts.bed", {"lines": lines}, out_bed)
+    log(f"   lncRNA.exons.merged.bed lines: {lines}")
+    qc_add("Step [4k] lncRNA.exons.merged.bed", {"lines": lines}, out_bed)
     return out_bed
 
 
@@ -557,13 +678,128 @@ def step_known_gffread(ref_fa, ref_lnc_gtf, out_dir, sample):
     return fa
 
 
+def parse_info_field(info):
+    out = {}
+    for token in str(info).split(";"):
+        if not token:
+            continue
+        if "=" in token:
+            key, value = token.split("=", 1)
+            out[key] = value
+        else:
+            out[token] = "1"
+    return out
+
+
+def parse_number(value, default=None):
+    try:
+        text = str(value).strip()
+        if not text or text == ".":
+            return default
+        return float(text)
+    except Exception:
+        return default
+
+
+def parse_int_value(value, default=0):
+    try:
+        text = str(value).strip()
+        if not text or text == ".":
+            return default
+        return int(float(text))
+    except Exception:
+        return default
+
+
+def filter_normalized_vcf_by_ad(norm_vcf, flt_vcf, evidence_tsv,
+                                qual_min=30, dp_min=10, mq_min=20,
+                                af_min=0.05, alt_min=3):
+    opener = gzip.open if str(norm_vcf).endswith(".gz") else open
+    tmp_vcf = str(Path(flt_vcf).with_suffix("")) + ".tmp.vcf"
+    total = kept = 0
+    duplicate_keys = set()
+    seen_keys = set()
+    with opener(norm_vcf, "rt", encoding="utf-8", errors="replace") as inp, \
+            open(tmp_vcf, "w") as out_vcf, \
+            open(evidence_tsv, "w") as evidence:
+        evidence.write(
+            "chrom\tpos_1based\tref\talt\tqual\tfilter\tmq\tref_reads\talt_reads\t"
+            "total_depth\tvaf\tevent_qc_status\tevent_qc_reason\n"
+        )
+        for line in inp:
+            if line.startswith("#"):
+                out_vcf.write(line)
+                continue
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 10:
+                continue
+            total += 1
+            chrom, pos, _rec_id, ref, alt = fields[0], fields[1], fields[2], fields[3], fields[4]
+            if "," in alt:
+                raise ValueError(f"Normalized VCF still has multiallelic ALT at {chrom}:{pos}:{ref}>{alt}")
+            key = (chrom, pos, ref, alt)
+            if key in seen_keys:
+                duplicate_keys.add(f"{chrom}:{pos}:{ref}>{alt}")
+                continue
+            seen_keys.add(key)
+
+            qual = parse_number(fields[5], None)
+            info = parse_info_field(fields[7])
+            mq = parse_number(info.get("MQ", ""), None)
+            fmt_keys = fields[8].split(":")
+            sample_values = fields[9].split(":")
+            sample_map = dict(zip(fmt_keys, sample_values))
+            ad_values = [parse_int_value(value, 0) for value in sample_map.get("AD", "").split(",") if value != ""]
+            if len(ad_values) < 2:
+                raise ValueError(f"VCF record lacks usable FORMAT/AD after normalization: {chrom}:{pos}:{ref}>{alt}")
+            ref_reads = ad_values[0]
+            alt_reads = ad_values[1]
+            total_depth = ref_reads + alt_reads
+            vaf = (alt_reads / total_depth) if total_depth else 0.0
+
+            reasons = []
+            if fields[6] not in {"PASS", "."}:
+                reasons.append("vcf_filter_not_pass")
+            if qual is None or qual < qual_min:
+                reasons.append("variant_qual_below_threshold")
+            if total_depth < dp_min:
+                reasons.append("total_depth_below_threshold")
+            if vaf < af_min:
+                reasons.append("vaf_below_threshold")
+            if alt_reads < alt_min:
+                reasons.append("alt_reads_below_threshold")
+            if mq is None or mq < mq_min:
+                reasons.append("mapping_quality_below_threshold")
+
+            status = "pass" if not reasons else "fail"
+            evidence.write(
+                f"{chrom}\t{pos}\t{ref}\t{alt}\t{fields[5]}\t{fields[6]}\t{info.get('MQ', '')}\t"
+                f"{ref_reads}\t{alt_reads}\t{total_depth}\t{vaf:.6g}\t{status}\t{';'.join(reasons)}\n"
+            )
+            if status == "pass":
+                fields[6] = "PASS"
+                out_vcf.write("\t".join(fields) + "\n")
+                kept += 1
+    if duplicate_keys:
+        raise ValueError(f"Duplicate exact event keys remain after normalization: {sorted(duplicate_keys)[:5]}")
+    run(["bcftools", "view", "-Oz", "-o", flt_vcf, tmp_vcf])
+    run(["bcftools", "index", "-f", flt_vcf])
+    try:
+        os.remove(tmp_vcf)
+    except OSError:
+        pass
+    return {"normalized_records": total, "filtered_records": kept}
+
+
 def step_call_rnaseq_variants(sorted_bam, ref_fa, bed, out_dir,
                               mapq=20, baseq=20, depth_cap=100000,
-                              qual_min=30, dp_min=10, mq_min=30, af_min=0.05):
+                              qual_min=30, dp_min=10, mq_min=20, af_min=0.05,
+                              alt_min=3, sample=""):
     """
     Call RNA-seq variants within BED regions + hard-filter.
-    - mpileup collects AD,DP only (omit MQ to avoid version issues).
-    - Filtering uses QUAL, sample depth FMT/DP[0], and allele frequency INFO/AF.
+    - mpileup collects AD/DP with explicit MAPQ/base-quality thresholds.
+    - VCF is normalized, split, exact-deduplicated, then filtered by AD-derived
+      depth/VAF/ALT reads plus QUAL and INFO/MQ.
     """
     log(">> [4k+] bcftools variant calling (restricted to lncRNA BED)")
     ensure_dir(out_dir)
@@ -576,13 +812,71 @@ def step_call_rnaseq_variants(sorted_bam, ref_fa, bed, out_dir,
     raw_bcf = str(Path(out_dir) / "rna.raw.bcf")
     call_vcf = str(Path(out_dir) / "rna.call.vcf.gz")
     call_vcf_sorted = str(Path(out_dir) / "rna.call.sorted.vcf.gz")
-    call_vcf_tags = str(Path(out_dir) / "rna.call.sorted.tags.vcf.gz")
+    split_vcf = str(Path(out_dir) / "rna.call.norm.split.vcf.gz")
+    norm_vcf = str(Path(out_dir) / "rna.call.norm.split.dedup.vcf.gz")
     flt_vcf = str(Path(out_dir) / "rna.flt.vcf.gz")
+    evidence_tsv = str(Path(out_dir) / "rna.variant_evidence.tsv")
+    manifest_json = str(Path(out_dir) / "rna.variant_calling.manifest.json")
+    legacy_outputs = [raw_bcf, call_vcf, call_vcf_sorted, split_vcf, norm_vcf, flt_vcf, evidence_tsv]
 
-    # 1) mpileup | call  (AD,DP only; no MQ)
+    flag_filter = RNA_VARIANT_CALLING_FLAG_FILTER
+    parameters = {
+        "mpileup_flag_filter": flag_filter,
+        "read_mapq_min": mapq,
+        "base_quality_min": baseq,
+        "depth_cap": depth_cap,
+        "variant_qual_min": qual_min,
+        "total_depth_min_ad_derived": dp_min,
+        "variant_mq_min": mq_min,
+        "vaf_min_ad_derived": af_min,
+        "alt_reads_min": alt_min,
+        "normalization": RNA_VARIANT_CALLING_NORMALIZATION_POLICY,
+    }
+    input_signature = {
+        "policy_version": RNA_VARIANT_CALLING_POLICY_VERSION,
+        "sample": str(sample or ""),
+        "sample_bam": file_identity(sorted_bam),
+        "reference_fasta": file_identity(ref_fa),
+        "exon_bed": file_identity(bed),
+        "parameters": parameters,
+        "bcftools_version": command_version(["bcftools", "--version"]),
+        "calling_script_sha256": sha256_file(Path(__file__)),
+    }
+
+    if exists(manifest_json):
+        with open(manifest_json, "r", encoding="utf-8") as handle:
+            old_manifest = json.load(handle)
+        if old_manifest.get("policy_version") != RNA_VARIANT_CALLING_POLICY_VERSION:
+            raise RuntimeError(f"Existing RNA variant calling manifest has unsupported policy: {manifest_json}")
+        if old_manifest.get("input_signature") != input_signature:
+            raise RuntimeError(
+                "Existing RNA variant calling manifest does not match current inputs/parameters; "
+                f"use a new output directory before rerun: {manifest_json}"
+            )
+        old_output_signature = old_manifest.get("output_signature")
+        if not outputs_match_signature(old_output_signature):
+            raise RuntimeError(f"Existing RNA variant calling output_signature no longer matches files: {manifest_json}")
+        filter_stats = old_manifest.get("filter_stats", {})
+        qc_add("Step [4k+] bcftools (mpileup/call/filter)", {
+            "mapq": mapq, "baseq": baseq, "depth_cap": depth_cap,
+            "qual_min": qual_min, "dp_min": dp_min, "mq_min": mq_min,
+            "af_min": af_min, "alt_min": alt_min,
+            "normalized_records": filter_stats.get("normalized_records"),
+            "filtered_records": filter_stats.get("filtered_records"),
+            "resume": True,
+        }, flt_vcf)
+        return flt_vcf
+
+    if any(exists(path) for path in legacy_outputs):
+        raise RuntimeError(
+            "Existing RNA VCF intermediates lack rna.variant_calling.manifest.json; "
+            "use a new output directory or remove the old 04k.bcf_consensus outputs before formal rerun."
+        )
+
+    # 1) mpileup | call
     if not exists(raw_bcf):
         mp_cmd = ["bcftools", "mpileup", "-Ou", "-f", ref_fa,
-                  "-R", bed, "--ff", "0x900",
+                  "-R", bed, "--ff", flag_filter,
                   "-q", str(mapq), "-Q", str(baseq),
                   "-d", str(depth_cap),
                   "-a", "AD,DP",
@@ -605,20 +899,50 @@ def step_call_rnaseq_variants(sorted_bam, ref_fa, bed, out_dir,
         run(["bcftools", "sort", "-Oz", "-o", call_vcf_sorted, call_vcf])
     run(["bcftools", "index", "-f", call_vcf_sorted])
 
-    # 4) fill tags (AF/AC/AN)
-    if not exists(call_vcf_tags):
-        run(["bcftools", "+fill-tags", call_vcf_sorted, "-Oz", "-o", call_vcf_tags, "--", "-t", "AF,AC,AN"])
-    run(["bcftools", "index", "-f", call_vcf_tags])
+    # 4) normalize/split multiallelics, then exact-deduplicate.
+    # bcftools rejects combining "-m -any" and "-d exact" in current releases.
+    if not exists(split_vcf):
+        run(["bcftools", "norm", "-f", ref_fa, "-m", "-any", "-Oz", "-o", split_vcf, call_vcf_sorted])
+    run(["bcftools", "index", "-f", split_vcf])
+    if not exists(norm_vcf):
+        run(["bcftools", "norm", "-d", "exact", "-Oz", "-o", norm_vcf, split_vcf])
+    run(["bcftools", "index", "-f", norm_vcf])
 
-    # 5) filter by FMT/DP[0] + INFO/AF + QUAL
-    expr = f"QUAL<{qual_min} || FMT/DP[0]<{dp_min} || INFO/AF<{af_min}"
+    # 5) AD-derived evidence table and final pass-only VCF
+    filter_stats = {"normalized_records": 0, "filtered_records": 0}
     if not exists(flt_vcf):
-        run(["bcftools", "filter", "-e", expr, "-Oz", "-o", flt_vcf, call_vcf_tags])
-        run(["bcftools", "index", "-f", flt_vcf])
+        filter_stats = filter_normalized_vcf_by_ad(
+            norm_vcf, flt_vcf, evidence_tsv,
+            qual_min=qual_min, dp_min=dp_min, mq_min=mq_min,
+            af_min=af_min, alt_min=alt_min,
+        )
+    elif not exists(evidence_tsv):
+        raise RuntimeError(f"Filtered VCF exists but evidence table is missing: {evidence_tsv}")
+
+    outputs = {
+            "raw_bcf": file_identity(raw_bcf),
+            "call_vcf_sorted": file_identity(call_vcf_sorted),
+            "norm_split_vcf": file_identity(split_vcf),
+            "norm_split_dedup_vcf": file_identity(norm_vcf),
+            "filtered_vcf": file_identity(flt_vcf),
+            "variant_evidence_tsv": file_identity(evidence_tsv),
+    }
+    manifest = {
+        "policy_version": RNA_VARIANT_CALLING_POLICY_VERSION,
+        "sample": str(sample or ""),
+        "run_status": "complete",
+        "input_signature": input_signature,
+        "output_signature": outputs,
+        "filter_stats": filter_stats,
+    }
+    write_json_atomic(manifest_json, manifest)
 
     qc_add("Step [4k+] bcftools (mpileup/call/filter)", {
         "mapq": mapq, "baseq": baseq, "depth_cap": depth_cap,
-        "qual_min": qual_min, "dp_min": dp_min, "af_min": af_min
+        "qual_min": qual_min, "dp_min": dp_min, "mq_min": mq_min,
+        "af_min": af_min, "alt_min": alt_min,
+        "normalized_records": filter_stats.get("normalized_records"),
+        "filtered_records": filter_stats.get("filtered_records"),
     }, flt_vcf)
     return flt_vcf
 
@@ -749,6 +1073,12 @@ def parse_args():
                     help="Sample-level shared intermediate dir (used by both known/novel for 01.sort_index)")
 
     ap.add_argument("--threads", default="20")
+    ap.add_argument(
+        "--strandedness",
+        choices=["reverse", "forward", "none"],
+        default="reverse",
+        help="StringTie strandedness: reverse->--rf, forward->--fr, none->no extra option",
+    )
     ap.add_argument("--trinity-cpu", default="20")
     ap.add_argument("--trinity-mem", default="100G")
     ap.add_argument("--pid", default="0.95")
@@ -777,8 +1107,9 @@ def parse_args():
     ap.add_argument("--bcf-depth-cap", type=int, default=100000)
     ap.add_argument("--bcf-qual-min", type=int, default=30)
     ap.add_argument("--bcf-dp-min", type=int, default=10)
-    ap.add_argument("--bcf-mq-min", type=int, default=30)  # reserved: for optional secondary filtering/stats
-    ap.add_argument("--bcf-af-min", type=float, default=0.05)  # reserved: for adding AF filter expression
+    ap.add_argument("--bcf-mq-min", type=int, default=20)
+    ap.add_argument("--bcf-af-min", type=float, default=0.05)
+    ap.add_argument("--bcf-alt-min", type=int, default=3)
     ap.add_argument("--consensus-hap", default="A", help="bcftools consensus -H (A/1/2). Default A")
     # === Execution mode & SIF image path ===
     ap.add_argument("--trinity-mode", choices=["native", "apptainer"], default="native",
@@ -843,7 +1174,13 @@ def main():
         assert exists(ref_gtf), f"ref gtf missing: {ref_gtf}"
 
         # [1_1] ST + gffcompare
-        st_gtf, comp_annot = step_stringtie_gffcompare(sorted_bam, ref_gtf, a.threads, d01_1)
+        st_gtf, comp_annot = step_stringtie_gffcompare(
+            sorted_bam,
+            ref_gtf,
+            a.threads,
+            d01_1,
+            strandedness=a.strandedness,
+        )
         out_paths["stringtie_gtf"] = st_gtf;
         out_paths["comp_annot"] = comp_annot
 
@@ -886,8 +1223,8 @@ def main():
         ref_lnc_fa = step_known_gffread(ref_fa, ref_lnc, d04k, a.sample)
         out_paths["ref_lnc_fa"] = ref_lnc_fa
 
-        # Generate transcript-level BED from ref_lnc_gtf (restrict calling region)
-        lnc_bed = str(Path(d04k) / "lncRNA.transcripts.bed")
+        # Generate merged exon BED from ref_lnc_gtf (restrict calling region)
+        lnc_bed = str(Path(d04k) / "lncRNA.exons.merged.bed")
         step_gtf_to_bed_transcripts(ref_lnc, lnc_bed)
         out_paths["lnc_bed"] = lnc_bed
 
@@ -895,7 +1232,8 @@ def main():
         flt_vcf = step_call_rnaseq_variants(
             sorted_bam, ref_fa, lnc_bed, d04k2,
             mapq=a.bcf_mapq, baseq=a.bcf_baseq, depth_cap=a.bcf_depth_cap,
-            qual_min=a.bcf_qual_min, dp_min=a.bcf_dp_min, mq_min=a.bcf_mq_min, af_min=a.bcf_af_min
+            qual_min=a.bcf_qual_min, dp_min=a.bcf_dp_min, mq_min=a.bcf_mq_min,
+            af_min=a.bcf_af_min, alt_min=a.bcf_alt_min, sample=a.sample
         )
         out_paths["flt_vcf"] = flt_vcf
 

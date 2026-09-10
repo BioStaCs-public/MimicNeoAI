@@ -11,6 +11,8 @@ Required software versions (for reproducibility/documentation):
 - Java 17
 """
 import os
+import shlex
+import sys
 import traceback
 from typing import Dict, Any
 from mimicneoai.mutation_derived_pipeline.scripts.run_mutect2 import Mutect2
@@ -146,18 +148,22 @@ def mutation_calling(run_sample_id: str, sample_name: str, tool, configure: dict
     tool.judge_then_exec(run_sample_id, cmd_apply_bqsr, bqsr_bam)
 
 
-    # --- 4) bamdst coverage (after BQSR) ---
+    # --- 4) bamdst coverage (after markdup) ---
     bamdst_bed = configure["others"].get(
         "bed_file",
         "ERROR!",  # fallback
     )
-    bamdst_dir = os.path.join(dir_bqsr, "bamdst") + "/"
+    bamdst_dir = os.path.join(dir_markdup, "bamdst") + "/"
     tool.judge_then_exec(run_sample_id, f"mkdir -p {bamdst_dir}", bamdst_dir)
 
     # bamdst typical creates coverage.report / depth.freq or similar; choose a stable sentinel
     bamdst_done = os.path.join(bamdst_dir, "coverage.report")
-    cmd_bamdst = f"bamdst -p {bamdst_bed} {bqsr_bam} -o {bamdst_dir}"
+    cmd_bamdst = f"bamdst -p {bamdst_bed} {markdup_bam} -o {bamdst_dir}"
     tool.judge_then_exec(run_sample_id, cmd_bamdst, bamdst_done)
+
+    prefixed_coverage_report = os.path.join(bamdst_dir, f"{sample_name}.coverage.report")
+    cmd_rename_coverage_report = f"mv {bamdst_done} {prefixed_coverage_report}"
+    tool.judge_then_exec(run_sample_id, cmd_rename_coverage_report, prefixed_coverage_report)
 
     return dir_varcall_root, bqsr_bam
 
@@ -266,14 +272,12 @@ def variants_calling_start(sample_name: str, tool, configure: dict, paths: dict)
     try:
         # ---- matched-normal validation ----
         if not bool(configure["others"]["tumor_with_matched_normal"]):
-            tool.write_log(
-                "Only matched-normal mode is supported (tumor_with_matched_normal=True).",
-                "error",
+            raise ValueError(
+                "Only matched-normal mode is supported "
+                "(tumor_with_matched_normal=True)."
             )
-            return
         if "," not in sample_name:
-            tool.write_log("Matched-normal mode requires sample_name='TUMOR,NORMAL'", "error")
-            return
+            raise ValueError("Matched-normal mode requires sample_name='TUMOR,NORMAL'")
 
         tumor_sample, normal_sample = [x.strip() for x in sample_name.split(",")[:2]]
 
@@ -446,7 +450,7 @@ def variants_calling_start(sample_name: str, tool, configure: dict, paths: dict)
         tool.judge_then_exec(sample_name, f"mkdir -p {merge_dir}", merge_dir)
 
         # mutect_pass / strelka_pass / vardict_pass
-        merge_mutect_strelka_vardict(
+        merge_outputs = merge_mutect_strelka_vardict(
             tool=tool,
             run_sample_id=sample_name,
             ref=ref,
@@ -460,6 +464,24 @@ def variants_calling_start(sample_name: str, tool, configure: dict, paths: dict)
         )
         tool.write_log(f"Merge done. Outputs in: {merge_dir}", "info")
 
+        # ---- subset BAMs for IGV using Merge3Callers 04.bed pad200 BED ----
+        igv_bam_dir = os.path.join(merge_dir, "05.igv_bam")
+        subset_script = os.path.join(os.path.dirname(__file__), "subset_bam_for_igv.py")
+        tumor_subset_bam = os.path.join(
+            igv_bam_dir,
+            f"{os.path.basename(tumor_bam)[:-4]}.subset.bam",
+        )
+        cmd_subset_igv_bam = (
+            f"{shlex.quote(sys.executable)} -u {shlex.quote(subset_script)} "
+            f"--tumor-bam {shlex.quote(tumor_bam)} "
+            f"--normal-bam {shlex.quote(normal_bam)} "
+            f"--bed {shlex.quote(merge_outputs['bed_pad200'])} "
+            f"--out-dir {shlex.quote(igv_bam_dir)} "
+            f"--threads {threads}"
+        )
+        tool.judge_then_exec(sample_name, cmd_subset_igv_bam, tumor_subset_bam)
+        tool.write_log(f"IGV subset BAMs done. Outputs in: {igv_bam_dir}", "info")
+
         tool.write_log(
             f"Variant calling finished (Mutect2/Strelka2/VarDict). Tumor={tumor_sample}",
             "info",
@@ -467,4 +489,4 @@ def variants_calling_start(sample_name: str, tool, configure: dict, paths: dict)
 
     except Exception:
         tool.write_log(f"variants_calling_start crashed:\n{traceback.format_exc()}", "error")
-
+        raise

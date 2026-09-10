@@ -1,80 +1,68 @@
-import re
+import hashlib
+import json
+import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from pathlib import Path
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 import torch
-import rpy2.robjects as ro
-from rpy2.robjects import pandas2ri
-from rpy2.robjects.conversion import localconverter
-from rpy2.robjects.packages import importr
 from tqdm import tqdm
 
 from mimicneoai.functions.nodemon_pool import NoDaemonPool
-from mimicneoai.immunogenicity_prediction.model import Vocab, build_model, load_model_weights
+from mimicneoai.immunogenicity_prediction.model import (
+    Vocab,
+    build_model,
+    checkpoint_payload,
+    load_model_weights,
+)
+from mimicneoai.immunogenicity_prediction.runtime.hla import normalize_hla
+from mimicneoai.immunogenicity_prediction.runtime.qc import (
+    INPUT_QC_COLUMNS,
+    annotate_input_qc,
+)
 
 
 AMINO = "ARNDCQEGHILKMFPSTWYV-"
 PADDING_LENGTH = 419
 X2_DIM = 25
-
-R_FEATURE_CODE = """
-calculate_features <- function(data, peptide_col) {
-    suppressPackageStartupMessages(library(Peptides))
-
-    calculate_polarity <- function(seq) {
-        polarities <- list(
-            hydrophilic = c('A','D','E','N','Q','R','S','T','Y'),
-            hydrophobic = c('I','L','M','F','P','V','W')
-        )
-        sum(sapply(strsplit(seq, '')[[1]], function(aa) {
-            if (aa %in% polarities$hydrophilic) 1
-            else if (aa %in% polarities$hydrophobic) -1
-            else 0
-        }))
-    }
-
-    aa_volumes <- c(
-        A=88.6, C=118.8, D=111.1, E=138.3, F=189.9, G=60.1,
-        H=153.2, I=166.6, K=168.6, L=166.6, M=162.9, N=114.1,
-        P=115.0, Q=146.2, R=174.0, S=105.9, T=119.0, V=140.0,
-        W=227.8, Y=193.6
-    )
-
-    calculate_volume <- function(seq) {
-        sum(sapply(strsplit(seq, '')[[1]], function(aa) {
-            if (aa %in% names(aa_volumes)) aa_volumes[aa] else 0
-        }))
-    }
-
-    data$aa_composition <- sapply(data[[peptide_col]], function(x)
-        paste(unlist(aaComp(x)), collapse=", "))
-    data$polarity <- sapply(data[[peptide_col]], calculate_polarity)
-    data$volume <- sapply(data[[peptide_col]], calculate_volume)
-    data$net_charge <- sapply(data[[peptide_col]], charge)
-    data$hydrophobicity <- sapply(data[[peptide_col]], hydrophobicity)
-    data$boman_index <- sapply(data[[peptide_col]], boman)
-    data$aliphatic_index <- sapply(data[[peptide_col]], aIndex)
-    data$isoelectric_point <- sapply(data[[peptide_col]], pI)
-
-    return(data)
-}
-"""
-
+SEPARATOR_LENGTH = 12
+PHYSICOCHEMICAL_FEATURE_COLUMNS = (
+    "AA Composition",
+    "Polarity",
+    "Volume",
+    "Net Charge",
+    "Hydrophobicity",
+    "Boman Index",
+    "Aliphatic Index",
+    "Isoelectric Point",
+)
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_HLA_PSEUDOSEQ_DIR = SCRIPT_DIR / "resources" / "hla_pseudoseq" / "local"
+DEFAULT_HLA_CLASS1_PSEUDOSEQ = DEFAULT_HLA_PSEUDOSEQ_DIR / "netmhcpan_class1_allele_to_pseudoseq.csv"
+DEFAULT_HLA_CLASS2_PSEUDOSEQ = DEFAULT_HLA_PSEUDOSEQ_DIR / "netmhciipan_class2_allele_to_pseudoseq.csv"
+DEFAULT_FEATURE_RSCRIPT = SCRIPT_DIR / "compute_peptide_features.R"
 
 @dataclass
 class InferenceConfig:
     model_path: str
-    hla_fasta_path: str
+    hla_fasta_path: str = ""
+    hla_source: str = "fasta"
+    hla_pseudoseq_csv: Tuple[str, ...] = ()
+    padding_length: int = 0
     peptide_col: str = "peptide"
     hla_col: str = "hla"
+    source_col: str = "antigen_class"
     output_score_col: str = "immunogenicity_score"
+    output_status_col: str = "immunogenicity_status"
     batch_size: int = 512
     device: str = "auto"
     num_processes: int = 1
     verbose: bool = True
+    include_input_qc: bool = False
 
 
 def pick_device(device_name: str) -> torch.device:
@@ -96,19 +84,6 @@ def pick_device(device_name: str) -> torch.device:
             )
         return torch.device(f"cuda:{idx}")
     return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-
-def normalize_hla(hla: str) -> str:
-    val = str(hla).strip()
-    val = re.sub(r"^HLA-", "", val, flags=re.IGNORECASE)
-    if "-" in val:
-        val = re.sub(r"(?<=[0-9])-(?=[A-Z])", "/", val)
-    if "/" in val:
-        val = val.split("/")[-1]
-    parts = val.split(":")
-    if len(parts) >= 2:
-        val = f"{parts[0]}:{parts[1]}"
-    return val
 
 
 def parse_hla_fasta(hla_fasta_path: str) -> Dict[str, str]:
@@ -149,18 +124,69 @@ def parse_hla_fasta(hla_fasta_path: str) -> Dict[str, str]:
     return dict(zip(hla_df["HLA"], hla_df["protin"]))
 
 
+def parse_hla_pseudoseq_csv(paths: Sequence[str | Path]) -> Dict[str, str]:
+    hla2seq: Dict[str, str] = {}
+    path_objs = [Path(path) for path in paths]
+    missing = [str(path) for path in path_objs if not path.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Missing HLA pseudo-sequence CSV(s): "
+            + ", ".join(missing)
+            + ". Place local NetMHC-derived resources under "
+            + str(DEFAULT_HLA_PSEUDOSEQ_DIR)
+            + " or configure hla_pseudoseq_csv."
+        )
+    for path in path_objs:
+        df = pd.read_csv(path)
+        required = {"allele", "pseudo_sequence"}
+        if not required.issubset(df.columns):
+            raise KeyError(f"{path} must contain columns: {sorted(required)}")
+        for row in df.itertuples(index=False):
+            allele = str(getattr(row, "allele")).strip()
+            seq = str(getattr(row, "pseudo_sequence")).strip().upper()
+            if not allele or not seq or seq.lower() == "nan":
+                continue
+            keys = {
+                allele,
+                allele.replace("HLA-", ""),
+                normalize_hla(allele),
+            }
+            for key in keys:
+                if key:
+                    hla2seq[key] = seq
+    return hla2seq
+
+
+def load_hla_sequences(cfg: InferenceConfig) -> Dict[str, str]:
+    if cfg.hla_source == "fasta":
+        if not cfg.hla_fasta_path:
+            raise ValueError("hla_fasta_path is required when hla_source='fasta'.")
+        return parse_hla_fasta(cfg.hla_fasta_path)
+    if cfg.hla_source == "netmhc-pseudoseq":
+        paths = cfg.hla_pseudoseq_csv or (
+            str(DEFAULT_HLA_CLASS1_PSEUDOSEQ),
+            str(DEFAULT_HLA_CLASS2_PSEUDOSEQ),
+        )
+        return parse_hla_pseudoseq_csv(paths)
+    raise ValueError(f"Unsupported HLA source: {cfg.hla_source}")
+
+
 def calculate_peptide_features(df: pd.DataFrame, peptide_col: str) -> pd.DataFrame:
-    pandas2ri.activate()
-    importr("Peptides")
-    ro.r(R_FEATURE_CODE)
-    calculate_features = ro.globalenv["calculate_features"]
-
-    with localconverter(ro.default_converter + pandas2ri.converter):
-        r_df = ro.conversion.py2rpy(df)
-        result_r = calculate_features(r_df, peptide_col)
-        result_df = ro.conversion.rpy2py(result_r)
-
-    return pd.DataFrame(result_df)
+    with tempfile.TemporaryDirectory(prefix="mimicneoai_features_") as tmp_dir:
+        input_path = Path(tmp_dir) / "input.csv"
+        output_path = Path(tmp_dir) / "output.csv"
+        df.to_csv(input_path, index=False)
+        subprocess.run(
+            [
+                "Rscript",
+                str(DEFAULT_FEATURE_RSCRIPT),
+                str(input_path),
+                str(output_path),
+                peptide_col,
+            ],
+            check=True,
+        )
+        return pd.read_csv(output_path)
 
 
 def _calc_features_worker(args):
@@ -280,7 +306,7 @@ def _encode_chunk_worker(args):
         hla_encode = aaindex_vocab(hla_paratope, vocab_map)
         feature_array = np.asarray(features_chunk[i], dtype=np.float32)
 
-        zero_array = np.zeros(12, dtype=np.float32)
+        zero_array = np.zeros(SEPARATOR_LENGTH, dtype=np.float32)
         merged = np.concatenate((feature_array, peptide_encode, zero_array, hla_encode), axis=0)
 
         if merged.shape[0] > padding_length:
@@ -348,7 +374,47 @@ def parallel_encode(
     return encoded_tensor, flags
 
 
-def run_inference(input_df: pd.DataFrame, cfg: InferenceConfig) -> pd.DataFrame:
+def resolve_padding_length(
+    requested_padding_length: int,
+    hla_source: str,
+    peptides: Sequence[str],
+    hla2prot: Dict[str, str],
+) -> int:
+    if requested_padding_length > 0:
+        return int(requested_padding_length)
+    if hla_source == "fasta":
+        return PADDING_LENGTH
+    max_peptide_len = max((len(str(peptide)) for peptide in peptides), default=0)
+    max_hla_len = max((len(seq) for seq in hla2prot.values()), default=0)
+    return X2_DIM + max_peptide_len + SEPARATOR_LENGTH + max_hla_len
+
+
+def prepare_inference_features(input_df: pd.DataFrame, cfg: InferenceConfig) -> pd.DataFrame:
+    """Normalize peptide-HLA input and calculate its reusable 25D feature table."""
+    if cfg.peptide_col not in input_df.columns or cfg.hla_col not in input_df.columns:
+        raise KeyError(f"Input must contain columns '{cfg.peptide_col}' and '{cfg.hla_col}'.")
+    work_df = (
+        annotate_input_qc(input_df, peptide_col=cfg.peptide_col, hla_col=cfg.hla_col)
+        if cfg.include_input_qc
+        else input_df.copy()
+    )
+    work_df[cfg.peptide_col] = work_df[cfg.peptide_col].astype(str).str.strip().str.upper()
+    work_df[cfg.hla_col] = work_df[cfg.hla_col].astype(str).str.strip()
+    work_df["_norm_hla"] = (
+        work_df["input_qc_normalized_hla"]
+        if cfg.include_input_qc
+        else work_df[cfg.hla_col].apply(normalize_hla)
+    )
+
+    return build_feature_table(work_df, cfg.peptide_col, cfg.num_processes)
+
+
+def run_inference(
+    input_df: pd.DataFrame,
+    cfg: InferenceConfig,
+    *,
+    prepared_feature_table: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     if cfg.peptide_col not in input_df.columns or cfg.hla_col not in input_df.columns:
         raise KeyError(f"Input must contain columns '{cfg.peptide_col}' and '{cfg.hla_col}'.")
 
@@ -360,65 +426,118 @@ def run_inference(input_df: pd.DataFrame, cfg: InferenceConfig) -> pd.DataFrame:
             f"batch_size={cfg.batch_size} num_processes={cfg.num_processes} device={cfg.device}"
         )
 
-    work_df = input_df.copy()
-    work_df[cfg.peptide_col] = work_df[cfg.peptide_col].astype(str).str.strip().str.upper()
-    work_df[cfg.hla_col] = work_df[cfg.hla_col].astype(str).str.strip()
-    work_df["_norm_hla"] = work_df[cfg.hla_col].apply(normalize_hla)
-
     t_feat = time.time()
-    if cfg.verbose:
-        print("[Immunogenicity] Extracting peptide physicochemical features...")
-    work_df = build_feature_table(work_df, cfg.peptide_col, cfg.num_processes)
-    if cfg.verbose:
-        print(f"[Immunogenicity] Feature extraction done in {time.time() - t_feat:.2f}s")
+    if prepared_feature_table is None:
+        if cfg.verbose:
+            print("[Immunogenicity] Extracting peptide physicochemical features...")
+        work_df = prepare_inference_features(input_df, cfg)
+        if cfg.verbose:
+            print(f"[Immunogenicity] Feature extraction done in {time.time() - t_feat:.2f}s")
+    else:
+        required_features = {cfg.peptide_col, cfg.hla_col, "_norm_hla", *PHYSICOCHEMICAL_FEATURE_COLUMNS}
+        if cfg.include_input_qc:
+            required_features.update(INPUT_QC_COLUMNS)
+        missing_features = required_features.difference(prepared_feature_table.columns)
+        if missing_features:
+            raise KeyError(
+                "Prepared feature table is missing columns: "
+                f"{sorted(missing_features)}"
+            )
+        if len(prepared_feature_table) != len(input_df):
+            raise ValueError("Prepared feature table row count does not match input_df.")
+        work_df = prepared_feature_table.copy()
+        if cfg.verbose:
+            print(f"[Immunogenicity] Reusing peptide physicochemical features ({time.time() - t_feat:.2f}s)")
 
-    infer_df = work_df[
-        [
+    infer_columns = [
             cfg.peptide_col,
             cfg.hla_col,
-            "AA Composition",
-            "Polarity",
-            "Volume",
-            "Net Charge",
-            "Hydrophobicity",
-            "Boman Index",
-            "Aliphatic Index",
-            "Isoelectric Point",
-        ]
-    ].copy()
+            *PHYSICOCHEMICAL_FEATURE_COLUMNS,
+    ]
+    if cfg.source_col in work_df.columns:
+        infer_columns.append(cfg.source_col)
+    infer_df = work_df[infer_columns].copy()
 
     infer_df["_norm_hla"] = infer_df[cfg.hla_col].apply(normalize_hla)
-    infer_df = infer_df.drop_duplicates(subset=["_norm_hla", cfg.peptide_col]).reset_index(drop=True)
+    dedup_columns = ["_norm_hla", cfg.peptide_col]
+    if cfg.source_col in infer_df.columns:
+        dedup_columns.append(cfg.source_col)
+    infer_df = infer_df.drop_duplicates(subset=dedup_columns).reset_index(drop=True)
 
     device = pick_device(cfg.device)
     vocab = Vocab(list(AMINO), min_freq=1)
-    hla2prot = parse_hla_fasta(cfg.hla_fasta_path)
+    hla2prot = load_hla_sequences(cfg)
 
     features_np = extract_feature_vector(infer_df, cfg.num_processes)
     peptides = infer_df[cfg.peptide_col].tolist()
     hlas = infer_df["_norm_hla"].tolist()
+    payload = checkpoint_payload(cfg.model_path, device)
+    metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
+    model_config = metadata.get("model_config", {})
+    source_mapping = metadata.get("source_mapping", {})
+    checkpoint_hla_source = metadata.get("hla_source")
+    if checkpoint_hla_source and checkpoint_hla_source != cfg.hla_source:
+        raise ValueError(
+            f"Inference hla_source={cfg.hla_source} does not match checkpoint hla_source={checkpoint_hla_source}"
+        )
+    if model_config.get("architecture") == "source_aware" and cfg.source_col not in infer_df.columns:
+        raise KeyError(f"Source-aware checkpoint requires input column '{cfg.source_col}'")
+    checkpoint_padding = int(metadata.get("padding_length", 0) or 0)
+    padding_length = resolve_padding_length(
+        cfg.padding_length or checkpoint_padding,
+        cfg.hla_source,
+        peptides,
+        hla2prot,
+    )
+
+    scaler = metadata.get("physchem_scaler")
+    if scaler is not None:
+        expected_digest = metadata.get("physchem_scaler_sha256")
+        actual_digest = hashlib.sha256(json.dumps(scaler, sort_keys=True).encode("utf-8")).hexdigest()
+        if expected_digest and actual_digest != expected_digest:
+            raise RuntimeError("Checkpoint-bound physicochemical scaler digest mismatch")
+        mean = np.asarray(scaler["mean"], dtype=np.float32)
+        scale = np.asarray(scaler["scale"], dtype=np.float32)
+        features_np = (features_np - mean) / scale
+        clip = float(scaler.get("clip", 0.0))
+        if clip > 0:
+            features_np = np.clip(features_np, -clip, clip)
+        if not np.isfinite(features_np).all():
+            raise RuntimeError("Checkpoint-bound physicochemical scaling produced NaN/Inf")
+    elif model_config.get("physchem_fusion") == "embedding_refine":
+        raise RuntimeError("embedding_refine checkpoint is missing its bound physicochemical scaler")
 
     t_enc = time.time()
     if cfg.verbose:
-        print("[Immunogenicity] Encoding peptide/HLA pairs...")
+        print(
+            "[Immunogenicity] Encoding peptide/HLA pairs... "
+            f"hla_source={cfg.hla_source} padding_length={padding_length}"
+        )
     encoded_all, flags_all = parallel_encode(
         features_np=features_np,
         peptides=peptides,
         hlas=hlas,
         hla2prot=hla2prot,
         vocab_map=vocab.token_to_idx,
-        padding_length=PADDING_LENGTH,
+        padding_length=padding_length,
         num_processes=cfg.num_processes,
     )
     if cfg.verbose:
         print(f"[Immunogenicity] Encoding done in {time.time() - t_enc:.2f}s")
+        missing_hla_count = len(flags_all) - int(sum(flags_all))
+        if missing_hla_count:
+            print(f"[Immunogenicity] Missing HLA sequence rows: {missing_hla_count}")
 
-    model = build_model(vocab_size=len(vocab), pad_idx=vocab["<pad>"])
+    model = build_model(vocab_size=len(vocab), pad_idx=vocab["<pad>"], model_config=model_config)
     load_model_weights(model, cfg.model_path, device)
     model.to(device)
     model.eval()
 
     probs_out: List[float] = []
+    status_out: List[str] = []
+    missing_hla_status = (
+        "missing_hla_pseudoseq" if cfg.hla_source == "netmhc-pseudoseq" else "missing_hla_fasta"
+    )
     t_inf = time.time()
     if cfg.verbose:
         print("[Immunogenicity] Running model inference...")
@@ -430,19 +549,72 @@ def run_inference(input_df: pd.DataFrame, cfg: InferenceConfig) -> pd.DataFrame:
 
             x1 = batch_encoded[:, X2_DIM:].long()
             x2 = batch_encoded[:, 0:X2_DIM].float()
-            logits = model(x1, x2)
+            source_ids = None
+            if model_config.get("architecture") == "source_aware":
+                source_values = infer_df.iloc[start:end][cfg.source_col].astype(str).tolist()
+                missing_sources = sorted(set(source_values) - set(source_mapping))
+                if missing_sources:
+                    raise KeyError(f"Checkpoint source mapping does not contain: {missing_sources}")
+                source_ids = torch.tensor(
+                    [source_mapping[value] for value in source_values],
+                    dtype=torch.long,
+                    device=device,
+                )
+            if model_config.get("physchem_fusion") == "embedding_refine":
+                lengths = torch.tensor(
+                    [len(peptide) for peptide in peptides[start:end]],
+                    dtype=torch.long,
+                    device=device,
+                )
+                present = torch.ones(len(lengths), dtype=torch.float32, device=device)
+                if source_ids is None:
+                    logits = model(x1, x2, peptide_lengths=lengths, physchem_present=present)
+                else:
+                    logits = model(
+                        x1,
+                        x2,
+                        source_ids,
+                        peptide_lengths=lengths,
+                        physchem_present=present,
+                    )
+            else:
+                logits = model(x1, x2) if source_ids is None else model(x1, x2, source_ids)
             probs = torch.softmax(logits, dim=1).cpu().numpy()
 
             for j, flag in enumerate(batch_flags):
-                probs_out.append(float(probs[j, 1]) if flag else 0.5)
+                if flag:
+                    probs_out.append(float(probs[j, 1]))
+                    status_out.append("ok")
+                else:
+                    probs_out.append(float("nan"))
+                    status_out.append(missing_hla_status)
 
     infer_df[cfg.output_score_col] = probs_out
+    infer_df[cfg.output_status_col] = status_out
 
+    merge_keys = [cfg.peptide_col, "_norm_hla"]
+    if model_config.get("architecture") == "source_aware":
+        merge_keys.append(cfg.source_col)
     scored = work_df.merge(
-        infer_df[[cfg.peptide_col, "_norm_hla", cfg.output_score_col]],
-        on=[cfg.peptide_col, "_norm_hla"],
+        infer_df[merge_keys + [cfg.output_score_col, cfg.output_status_col]],
+        on=merge_keys,
         how="left",
     )
+    if cfg.include_input_qc:
+        scored["input_qc_hla_reference_status"] = np.where(
+            scored[cfg.output_status_col].eq("ok"),
+            "matched",
+            scored[cfg.output_status_col],
+        )
+        missing_reference = ~scored[cfg.output_status_col].eq("ok")
+        if missing_reference.any():
+            additions = scored.loc[missing_reference, "input_qc_hla_reference_status"]
+            existing = scored.loc[missing_reference, "input_qc_flags"].fillna("")
+            scored.loc[missing_reference, "input_qc_flags"] = [
+                f"{flag};{addition}" if flag else str(addition)
+                for flag, addition in zip(existing, additions)
+            ]
+            scored.loc[missing_reference, "input_qc_status"] = "warning"
     scored = scored.drop(columns=["_norm_hla"])
 
     if cfg.verbose:
@@ -457,30 +629,61 @@ def export_model_to_onnx(
     onnx_path: str,
     device_name: str = "cpu",
     opset_version: int = 17,
+    padding_length: int = PADDING_LENGTH,
 ) -> None:
     device = pick_device(device_name)
     vocab = Vocab(list(AMINO), min_freq=1)
-    model = build_model(vocab_size=len(vocab), pad_idx=vocab["<pad>"])
+    payload = checkpoint_payload(model_path, device)
+    metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
+    model_config = metadata.get("model_config", {})
+    model = build_model(vocab_size=len(vocab), pad_idx=vocab["<pad>"], model_config=model_config)
     load_model_weights(model, model_path, device)
     model.to(device)
     model.eval()
 
-    x1_len = PADDING_LENGTH - X2_DIM
+    x1_len = int(padding_length) - X2_DIM
     dummy_x1 = torch.zeros((1, x1_len), dtype=torch.long, device=device)
     dummy_x2 = torch.zeros((1, X2_DIM), dtype=torch.float32, device=device)
 
+    embedding_refine = model_config.get("physchem_fusion") == "embedding_refine"
+    source_aware = model_config.get("architecture") == "source_aware"
+    dummy_source = torch.zeros((1,), dtype=torch.long, device=device)
+    if embedding_refine:
+        dummy_lengths = torch.full((1,), 9, dtype=torch.long, device=device)
+        dummy_present = torch.ones((1,), dtype=torch.float32, device=device)
+        if source_aware:
+            model_inputs = (dummy_x1, dummy_x2, dummy_source, dummy_lengths, dummy_present)
+            input_names = ["x1", "x2", "source_id", "peptide_lengths", "physchem_present"]
+        else:
+            model_inputs = (dummy_x1, dummy_x2, dummy_lengths, dummy_present)
+            input_names = ["x1", "x2", "peptide_lengths", "physchem_present"]
+        dynamic_axes = {
+            "x1": {0: "batch", 1: "seq_len"},
+            "x2": {0: "batch"},
+            "peptide_lengths": {0: "batch"},
+            "physchem_present": {0: "batch"},
+            "logits": {0: "batch"},
+        }
+        if source_aware:
+            dynamic_axes["source_id"] = {0: "batch"}
+    else:
+        model_inputs = (dummy_x1, dummy_x2, dummy_source) if source_aware else (dummy_x1, dummy_x2)
+        input_names = ["x1", "x2", "source_id"] if source_aware else ["x1", "x2"]
+        dynamic_axes = {
+            "x1": {0: "batch", 1: "seq_len"},
+            "x2": {0: "batch"},
+            "logits": {0: "batch"},
+        }
+        if source_aware:
+            dynamic_axes["source_id"] = {0: "batch"}
     torch.onnx.export(
         model,
-        (dummy_x1, dummy_x2),
+        model_inputs,
         onnx_path,
         export_params=True,
         opset_version=opset_version,
         do_constant_folding=True,
-        input_names=["x1", "x2"],
+        input_names=input_names,
         output_names=["logits"],
-        dynamic_axes={
-            "x1": {0: "batch", 1: "seq_len"},
-            "x2": {0: "batch"},
-            "logits": {0: "batch"},
-        },
+        dynamic_axes=dynamic_axes,
     )

@@ -2,3 +2,20 @@
 **/.ipynb_checkpoints/
 **/log/
 **/__pycache__/
+.venv/
+.venv-gpu/
+*.egg-info/
+build/
+dist/
+pipeliner.*.cmds
+
+/tmp/
+
+mimicneoai/database/
+mimicneoai/immunogenicity_prediction/resources/hla_pseudoseq/local/
+
+# Runtime immunogenicity model payloads are recovered separately from code.
+mimicneoai/immunogenicity_prediction/models/default/
+
+# Generated example outputs.
+mimicneoai/example/immunogenicity_prediction/output/*_predictions.csv

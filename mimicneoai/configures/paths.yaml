@@ -7,6 +7,26 @@ path:
   common:
     GATK_JAR: "../database/soft/GATK/gatk-4.6.0.0.jar"
     PVACTOOLS: "../database/soft/PVACTOOLS/pvactools-4.2.1.sif"
+    APPTAINER_BIN: "/opt/conda/envs/mimicneoai-apptainer/bin/apptainer"
+    BCFTOOLS_BIN: "/opt/conda/envs/mimicneoai-tools/bin/bcftools"
+    TABIX_BIN: "/opt/conda/envs/mimicneoai-tools/bin/tabix"
+    BINDING_PREDICTORS:
+      MHCFLURRY_PREDICT_BIN: "/workspace/pkgs/mhcflurry/.venv/bin/mhcflurry-predict"
+      MHCFLURRY_DOWNLOADS_DIR: "/workspace/pkgs/mhcflurry/downloads/2.2.0"
+      MHCNUGGETS_PYTHON_BIN: "/workspace/pkgs/mhcnuggets/.venv/bin/python"
+      MHCNUGGETS_SCRIPT: "/workspace/pkgs/mhcnuggets/mhcnuggets/src/predict.py"
+      MHCNUGGETS_CWD: "/workspace/pkgs/mhcnuggets"
+      NETMHCPAN_BIN: "/workspace/pkgs/NetMHCpan/netMHCpan-4.2/netMHCpan"
+      NETMHCIIPAN_BIN: "/workspace/pkgs/NetMHCIIpan/netMHCIIpan-4.3/netMHCIIpan"
+      IEDB_MHCI_PYTHON_BIN: "/usr/bin/python3.10"
+      IEDB_MHCI_SCRIPT: "/workspace/pkgs/IEDB/mhc_i/src/predict_binding.py"
+      IEDB_MHCI_CWD: "/workspace/pkgs/IEDB/mhc_i/src"
+      IEDB_MHCII_PYTHON_BIN: "/workspace/pkgs/IEDB/.venv/bin/python"
+      IEDB_MHCII_SCRIPT: "/workspace/pkgs/IEDB/mhc_ii/mhc_II_binding.py"
+      IEDB_MHCII_CWD: "/workspace/pkgs/IEDB/mhc_ii"
+    IMMUNOGENICITY:
+      PYTHON_BIN: ""
+      MODEL_ROOT: "../immunogenicity_prediction/models/default"
 
   neoantigen:
     VEP_SIF:  "../database/soft/VEP/vep.sif"
@@ -21,10 +41,13 @@ database:
 
   common:
     HLA:
+      HLAHD_SCRIPT: "../database/soft/HLAHD/hlahd.1.7.0/bin/hlahd.sh"
       FREQ_DATA_DIR: "../database/soft/HLAHD/hlahd.1.7.0/freq_data/"
       HLA_GENE:      "../database/soft/HLAHD/hlahd.1.7.0/HLA_gene.split.txt"
       DICTIONARY:    "../database/soft/HLAHD/hlahd.1.7.0/dictionary/"
       BOWTIE2_INDEX: "../database/soft/HLAHD/hla_gen/hla_gen"
+    HUMAN_PROTEOME:
+      CANONICAL_FASTA: "../database/ref/DNA/human_proteome/processed/uniprot_swissprot_human_reviewed_canonical_20260626.fasta"
 
   microbial:
     HOST:
@@ -32,6 +55,8 @@ database:
         FA:  "../database/ref/DNA/GRCh38/GRCh38_full_analysis_set_plus_decoy_hla.fa"
       T2T:
         FA:  "../database/ref/DNA/t2t/chm13v2.0.fa"
+      MM10:
+        FA:  "../database/ref/DNA/mm10/mm10.fa"
       Primary_HG38:
         FA:   "../database/ref/DNA/GRCh38_primary/GRCh38.primary_assembly.genome.fa"
         IMG:  "../database/ref/DNA/GRCh38_primary/GRCh38.primary_assembly.genome.fa.img"
@@ -46,11 +71,16 @@ database:
       GENOME_LENGTHS:  "../database/ref/RNA/MimicNeoAI-Refs/BioStaCs_GenomeLength.csv"
       TAXID_HIERARCHY: "../database/ref/RNA/MimicNeoAI-Refs/BioStaCs_taxid_hierarchy.txt"
       CATALOG_GENOME:  "../database/ref/RNA/MimicNeoAI-Refs/BioStaCs_catalog_genome.txt"
+    BLACKLISTS:
+      CONTAMINANT_TAXIDS: "../database/ref/RNA/MimicNeoAI-Refs/blacklists/microbial_contaminant_taxids.tsv"
 
     BLAST:
       DB_DIR: "../database/ref/RNA/MimicNeoAI-Refs/BioStaCs_protein_v2"
       CATALOG_PROT: "../database/ref/RNA/MimicNeoAI-Refs/BioStaCs_protein_seqid2taxid_v2.txt.gz"
       OUTFMT: "'6 qseqid qlen sseqid qseq sseq stitle pident length mismatch gapopen qstart qend sstart send evalue bitscore qcovhsp qcovs'"
+    DIAMOND:
+      DB: "../database/ref/RNA/MimicNeoAI-Refs/BioStaCs_protein_v2.dmnd"
+      OUTFMT: "'6 qseqid qlen sseqid qseq sseq stitle pident length mismatch gapopen qstart qend sstart send evalue bitscore qcovhsp'"
 
   neoantigen:
     HG38:
@@ -74,3 +104,12 @@ database:
       REF_GENOME:   "../database/ref/RNA/cryptic_ref/GRCh38.p3.genome.fa"
 
     STAR_GENOME_DIR: "../database/ref/RNA/star_and_rsem/GRCh38_gencode.v23"
+    EXTERNAL_NORMAL_RESOURCES:
+      MANIFEST: "../database/ref/RNA/cryptic_external_normal/frozen_20260727/resource_manifest.json"
+      SMORF_MATCH_INDEX: "../database/ref/RNA/cryptic_external_normal/frozen_20260727/processed/normal_smorf_peptide_match_index.tsv.gz"
+      SMORF_PARENT_MAP: "../database/ref/RNA/cryptic_external_normal/frozen_20260727/processed/normal_smorf_peptide_parent_map.tsv.gz"
+      HLA_LIGAND_MATCH_INDEX: "../database/ref/RNA/cryptic_external_normal/frozen_20260727/processed/normal_hla_peptide_match_index.tsv.gz"
+      HLA_LIGAND_EVIDENCE: "../database/ref/RNA/cryptic_external_normal/frozen_20260727/processed/normal_hla_ligand_evidence.tsv.gz"
+      COORDINATE_MANIFEST: "../database/ref/RNA/cryptic_external_normal/frozen_20260727_v1.1_coordinates/resource_manifest.json"
+      SMORF_COORDINATES: "../database/ref/RNA/cryptic_external_normal/frozen_20260727_v1.1_coordinates/processed/normal_smorfs_coordinates.tsv.gz"
+      SMORF_ORFCDS: "../database/ref/RNA/cryptic_external_normal/frozen_20260727_v1.1_coordinates/processed/normal_smorf_orfcds.tsv.gz"

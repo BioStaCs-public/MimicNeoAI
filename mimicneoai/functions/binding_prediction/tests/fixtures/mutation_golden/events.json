@@ -1,0 +1,64 @@
+{
+  "events": [
+    {
+      "name": "snv",
+      "variant_type": "missense",
+      "wt_sequence": "ACDEFGHIKLMNPQRSTVWYACDEF",
+      "mt_sequence": "ACDEFGHIKLMAPQRSTVWYACDEF",
+      "mutation_region": [11, 12],
+      "window_summary": {
+        "8": [8, 4, 11],
+        "9": [9, 3, 11],
+        "15": [11, 0, 10]
+      }
+    },
+    {
+      "name": "inframe_insertion",
+      "variant_type": "inframe_ins",
+      "wt_sequence": "ACDEFGHIKLMNPQRSTVWYACDEF",
+      "mt_sequence": "ACDEFGHIKLMAAANPQRSTVWYACDEF",
+      "mutation_region": [11, 14],
+      "window_summary": {
+        "8": [10, 4, 13],
+        "9": [11, 3, 13],
+        "15": [14, 0, 13]
+      }
+    },
+    {
+      "name": "inframe_deletion",
+      "variant_type": "inframe_del",
+      "wt_sequence": "ACDEFGHIKLMNPQRSTVWYACDEF",
+      "mt_sequence": "ACDEFGHIKLQRSTVWYACDEF",
+      "mutation_region": [10, 10],
+      "window_summary": {
+        "8": [7, 3, 9],
+        "9": [8, 2, 9],
+        "15": [8, 0, 7]
+      }
+    },
+    {
+      "name": "frameshift",
+      "variant_type": "FS",
+      "wt_sequence": "ACDEFGHIKLMNPQRSTVWYACDEF",
+      "mt_sequence": "ACDEFGHIKYYYYYYYYYYYYYYYY",
+      "mutation_region": [9, 25],
+      "window_summary": {
+        "8": [16, 2, 17],
+        "9": [16, 1, 16],
+        "15": [11, 0, 10]
+      }
+    },
+    {
+      "name": "n_terminal_snv",
+      "variant_type": "missense",
+      "wt_sequence": "ACDEFGHIKLMNPQRSTVWYACDEF",
+      "mt_sequence": "VCDEFGHIKLMNPQRSTVWYACDEF",
+      "mutation_region": [0, 1],
+      "window_summary": {
+        "8": [1, 0, 0],
+        "9": [1, 0, 0],
+        "15": [1, 0, 0]
+      }
+    }
+  ]
+}

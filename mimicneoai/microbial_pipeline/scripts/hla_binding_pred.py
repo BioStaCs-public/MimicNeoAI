@@ -1,6 +1,10 @@
 # coding=utf-8
 import os
 
+from mimicneoai.functions.nodemon_pool import NoDaemonPool
+from mimicneoai.functions.pipline_tools import raise_for_failed_samples
+
+
 def get_hlahd_results(sample: str, output_hla: str):
     """
     Extract HLA typing results from HLA-HD outputs.
@@ -77,7 +81,6 @@ def pvacbind(sample, configure, pathes, tool):
       - Writes a final 'done' flag when merged output is available.
     """
     import gzip
-    from mimicneoai.functions.nodemon_pool import NoDaemonPool
 
     # ---- Small utilities (local scope, minimal changes) ----
     def _ensure_dir(p): os.makedirs(p, exist_ok=True)
@@ -211,7 +214,8 @@ def pvacbind(sample, configure, pathes, tool):
             f"{chunk_fa} {sample} {HLA} {algoIandII} "
             f"{out_dir_i} -e1 8,9,10 -e2 15 "
             f"--iedb-install-directory /opt/iedb "
-            f"-t 1 --fasta-size 100000"
+            f"-t 1 --fasta-size 100000 "
+            f"< /dev/null"
         )
         tasks.append((cmd_i, target_i, f"chunk_{i}"))
 
@@ -221,14 +225,21 @@ def pvacbind(sample, configure, pathes, tool):
 
     # ---- Dispatch in parallel via NoDaemonPool ----
     pool = NoDaemonPool(min(len(tasks), n_chunks))
+    async_results = []
     for cmd_i, target_i, chunk_tag in tasks:
-        pool.apply_async(
-            tool.judge_then_exec,
-            (sample, cmd_i, target_i, chunk_tag),
-            error_callback=getattr(tool, "print_pool_error", None),
+        async_results.append(
+            (
+                f"{sample}:{chunk_tag}",
+                pool.apply_async(
+                    tool.judge_then_exec,
+                    (sample, cmd_i, target_i, chunk_tag),
+                    error_callback=getattr(tool, "print_pool_error", None),
+                ),
+            )
         )
     pool.close()
     pool.join()
+    raise_for_failed_samples(async_results)
 
     # ---- Merge chunk results ----
     merged_path = _merge_chunk_results(sample, output_pvacbind, n_chunks)

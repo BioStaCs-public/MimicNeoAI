@@ -22,6 +22,14 @@ args:
   mem : "128G"  # Maximum memory allocation
   mem_perthread : "256M"  # Memory per thread in samtools sort
 
+# Pre-binding candidate selection for microbial peptide Core.
+# all keeps the complete Core. ranked_cap ranks microbial source groups before
+# peptide tiling and keeps up to the requested unique HLA-I/HLA-II peptides.
+candidate_selection:
+  mode: "all"                    # all | ranked_cap
+  max_hla_i_peptides: null       # e.g. 400000 for Fig. 5 ranked runs
+  max_hla_ii_peptides: null      # e.g. 400000 for Fig. 5 ranked runs
+
 # Analysis Parameters
 others:
   species: "human"              # Species selection (human/mouse)
@@ -30,10 +38,19 @@ others:
 
   QC: True                  # Run read quality control
   run_host_depletion: True      # Run host read depletion (hg38 + T2T)
+  remove_mouse_host: False      # If True, remove mm10 host reads after T2T; if False, keep original hg38+T2T behavior
   run_vector_decontamination: True   # Run vector (UniVec) decontamination
 
   run_pathseq: True             # Run GATK PathSeq taxonomic profiling
   run_microbial_peptide_identification: True   # Run BLASTX/DIAMOND-based microbial peptide identification
+  microbial_peptide_search_engine: "blastx"  # blastx | diamond
+  tumor_with_matched_normal: false  # false: single-sample discovery; true: samples use Tumor,Normal pairs
+  protein_hit_qc_policy_version: "microbial_protein_hit_qc_v1.0"
+  run_paired_core_qc: false          # paired mode only: build matched-normal-depleted peptide Core without requiring binding
+  paired_core_step_name: "06b.MicrobialProteinCoreQC_v1.0"
+  allow_missing_blacklist: false     # exploratory only; formal paired Core QC requires contaminant blacklist
+  microbial_contaminant_blacklist_sha256: ""  # optional exact SHA256 guard for the configured blacklist
+  paired_core_max_estimated_peptide_windows: 20000000  # 0 disables the paired Core scale gate
 
   # BLASTX filtering thresholds for microbial peptides
   blastx_min_percent_identity: 100   # Percent identity threshold
@@ -44,7 +61,26 @@ others:
   run_binding_prediction: True       # Run peptide–HLA binding prediction
 
   algo: "BigMHC_EL BigMHC_IM DeepImmuno MHCflurry MHCflurryEL MHCnuggetsI MHCnuggetsII NNalign NetMHC NetMHCIIpan NetMHCIIpanEL NetMHCpan NetMHCpanEL PickPocket SMM SMMPMBEC"
+
+  # Binding prediction backend. Default uses MimicNeoAI native fast mode.
+  binding_prediction_backend: "mimicneoai"  # mimicneoai | pvactools
+  binding_prediction_preset: "fast"         # fast | full
+  binding_prediction_step_name: "08.MicrobialPeptidesBindingPrediction_mimicneoai"
+  binding_prediction_algorithms: "MHCflurry MHCflurryEL MHCnuggetsI MHCnuggetsII NetMHCpan NetMHCpanEL NetMHCIIpan NetMHCIIpanEL"
+  binding_prediction_workers: 8
+  # Estimate task scale before materializing binding_tasks.tsv.
+  binding_prediction_max_task_rows: 5000000
+  # Set true only when an oversized sample should be predicted intentionally.
+  binding_prediction_force_large_samples: false
+  run_immunogenicity_prediction: false
+  immunogenicity_step_name: "09.ImmunogenicityPrediction_mimicneoai"
+  immunogenicity_python_bin: ""  # Optional override; otherwise uses MIMICNEOAI_IMMUNOGENICITY_PYTHON_BIN, then paths.yaml.
+  immunogenicity_model_root: ""  # Optional override; otherwise uses MIMICNEOAI_IMMUNOGENICITY_MODEL_ROOT, then paths.yaml.
+  immunogenicity_device: "auto"
+  immunogenicity_batch_size: 512
+  immunogenicity_workers: 8
 # Sample List (Note: Numeric sample IDs require quotes)
+# If tumor_with_matched_normal is true, use exactly "TumorSample,NormalSample" per line.
 samples:
 - Sample_1
 - Sample_2

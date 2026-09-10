@@ -17,7 +17,7 @@ path:
 # Runtime Parameters
 args:
   thread: 30                # CPU threads per sample
-  hla_binding_threads : 5 # Number of threads for parallel pvactools runs; too many may reduce efficiency—adjust based on server performance.
+  hla_binding_threads : 5 # Number of binding-prediction workers; too many may reduce efficiency—adjust based on server performance.
   pool_size: 1              # Concurrent sample processing count
   mem: "128G"               # Max memory per sample (pool_size × mem < total memory)
 
@@ -41,13 +41,28 @@ others:
   hlatyping: True          # HLA typing enable
   peptides_identification_and_binding_prediction: True  # Peptide prediction
   mhc_i_epitope_lengths: "8,9,10,11"
-  mhc_ii_epitope_lengths: "15"
+  mhc_ii_epitope_lengths: "13,14,15,16,17"
   
   # WES-specific parameters
   bed_file: "/path/to/target_regions/exome_targets.bed"  # Capture regions file
 
   # Algorithms for pVACbind (space-separated)
   algo: "BigMHC_EL BigMHC_IM DeepImmuno MHCflurry MHCflurryEL MHCnuggetsI MHCnuggetsII NNalign NetMHC NetMHCIIpan NetMHCIIpanEL NetMHCpan NetMHCpanEL PickPocket SMM SMMPMBEC"
+
+  # Binding prediction backend. Mutation-derived antigens default to the native MimicNeoAI fast workflow.
+  binding_prediction_backend: "mimicneoai"  # mimicneoai | pvactools
+  binding_prediction_preset: "fast"         # fast | full
+  binding_prediction_start_from: "source_prep"  # source_prep | epitope_tasks
+  binding_prediction_step_name: "07.binding_prediction_mimicneoai"
+  binding_prediction_algorithms: "MHCflurry MHCflurryEL MHCnuggetsI MHCnuggetsII NetMHCpan NetMHCpanEL NetMHCIIpan NetMHCIIpanEL"
+  binding_prediction_workers: 8
+  run_immunogenicity_prediction: false
+  immunogenicity_step_name: "08.immunogenicity_prediction_mimicneoai"
+  immunogenicity_python_bin: ""  # Optional override; otherwise uses MIMICNEOAI_IMMUNOGENICITY_PYTHON_BIN, then paths.yaml.
+  immunogenicity_model_root: ""  # Optional override; otherwise uses MIMICNEOAI_IMMUNOGENICITY_MODEL_ROOT, then paths.yaml.
+  immunogenicity_device: "auto"
+  immunogenicity_batch_size: 512
+  immunogenicity_workers: 8
 
 # Sample List (Example entries)
 samples:
